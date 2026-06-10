@@ -689,12 +689,29 @@ bool is_control_sensitive(llama_token tok, const struct llama_vocab * vocab) {
         return true;
     }
 
-    // Chat template structural markers
+    // Chat template structural markers and other control-like patterns
     const char * text = llama_vocab_get_text(vocab, tok);
     if (text) {
+        // Standard chat markers
         if (strstr(text, "<|")   != nullptr) return true;
         if (strstr(text, "[INST]")  != nullptr) return true;
         if (strstr(text, "[/INST]") != nullptr) return true;
+
+        // Qwen2.5 / ChatML fragments (tokenizer may split these)
+        if (strstr(text, "im_start") != nullptr) return true;
+        if (strstr(text, "im_end")   != nullptr) return true;
+
+        // Llama 3 chat markers
+        if (strstr(text, "<|start_header_id|>") != nullptr) return true;
+        if (strstr(text, "<|end_header_id|>")   != nullptr) return true;
+        if (strstr(text, "<|eot_id|>")          != nullptr) return true;
+
+        // Generic: tokens starting with < or [ that look like markup
+        if (text[0] == '<' && strlen(text) > 2 && text[strlen(text)-1] == '>') return true;
+
+        // Structural whitespace: tokens containing newlines affect text layout
+        // and should never be loosely accepted
+        if (strchr(text, '\n') != nullptr) return true;
     }
 
     return false;
@@ -774,6 +791,13 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         // --- Ambiguity gate ---
         if (margin[j] >= ambiguity_threshold) {
             // Deterministic position → strict reject
+            if (params.debug_trace) {
+                const char * draft_text = llama_vocab_get_text(vocab, draft[j]);
+                const char * tgt_text   = llama_vocab_get_text(vocab, target[j]);
+                LOG_INF("FLy STRICT-REJECT pos %d: draft='%s' != target='%s', margin=%.2f >= %.2f\n",
+                        j, draft_text ? draft_text : "?", tgt_text ? tgt_text : "?",
+                        (double) margin[j], (double) ambiguity_threshold);
+            }
             first_reject = j;
             break;
         }
@@ -796,6 +820,13 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
 
         if (window_clean) {
             // Semantically equivalent wording — accept the draft token
+            if (params.debug_trace) {
+                const char * draft_text = llama_vocab_get_text(vocab, draft[j]);
+                const char * tgt_text   = llama_vocab_get_text(vocab, target[j]);
+                LOG_INF("FLy DEFER-ACCEPT pos %d: draft='%s' (id=%d) != target='%s' (id=%d), margin=%.2f\n",
+                        j, draft_text ? draft_text : "?", draft[j],
+                        tgt_text   ? tgt_text   : "?", target[j], (double) margin[j]);
+            }
             continue;
         } else {
             // Target is course-correcting — reject from j
