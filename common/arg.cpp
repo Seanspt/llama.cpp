@@ -3792,6 +3792,46 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
 
     //
+    // FLy speculative decoding
+    //
+
+    add_opt(common_arg(
+        {"--spec-fly"},
+        "enable training-free loosely speculative decoding (FLy)",
+        [](common_params & params) {
+            params.speculative.fly.enabled = true;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--spec-fly-threshold"}, "N",
+        string_format("FLy ambiguity margin threshold (default: %.1f)", params.speculative.fly.ambiguity_threshold),
+        [](common_params & params, const std::string & value) {
+            params.speculative.fly.ambiguity_threshold = std::stof(value);
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--spec-fly-window"}, "N",
+        string_format("FLy deferred window size (default: %d)", params.speculative.fly.window_size),
+        [](common_params & params, int value) {
+            params.speculative.fly.window_size = value;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--spec-fly-mla"},
+        "enable multi-level acceleration for FLy (accelerate the drafter too)",
+        [](common_params & params) {
+            params.speculative.fly.enable_mla = true;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
+        {"--spec-fly-debug"},
+        "enable FLy debug/trace output",
+        [](common_params & params) {
+            params.speculative.fly.debug_trace = true;
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+
+    //
     // removed params
     //
 

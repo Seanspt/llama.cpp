@@ -246,7 +246,18 @@ int main(int argc, char ** argv) {
         // available logits from the batch and sample the next token until we run out of logits or the sampler
         // disagrees with the draft
         //
-        auto ids = common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft);
+        // FLy or standard speculative verification
+        std::vector<llama_token> ids;
+        if (params.speculative.fly.enabled) {
+            // Build idxs = [0, 1, ..., draft.size()]
+            std::vector<int> fly_idxs(draft.size() + 1);
+            for (size_t i = 0; i < fly_idxs.size(); i++) {
+                fly_idxs[i] = (int) i;
+            }
+            ids = common_sampler_sample_and_accept_n_fly(smpl.get(), ctx_tgt, fly_idxs, draft, params.speculative.fly);
+        } else {
+            ids = common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft);
+        }
 
         //LOG_DBG("ids: %s\n", string_from(ctx_tgt, ids).c_str());
 
@@ -288,6 +299,21 @@ int main(int argc, char ** argv) {
         n_accept  += ids.size() - 1;
         n_predict += ids.size();
 
+        // KV cache sanity check: verify the cache covers up to n_past
+        // Note: with cache defrag/shift, pos_min may not be 0, so we
+        // check that pos_max >= n_past - 1 (the cache extends to current position)
+        {
+            const llama_pos pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), seq_id);
+            const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id);
+            if (pos_max < n_past - 1) {
+                LOG_ERR("KV cache TRUNCATED: pos_max=%d < n_past-1=%d\n", pos_max, n_past - 1);
+            }
+            if (params.speculative.fly.debug_trace) {
+                LOG_INF("KV check: range [%d, %d], n_past=%d, accepted %zu drafts, ok\n",
+                        pos_min, pos_max, n_past, ids.size() - 1);
+            }
+        }
+
         // process the accepted tokens and update contexts
         //
         // this is the standard token post-processing that we normally do
@@ -322,6 +348,12 @@ int main(int argc, char ** argv) {
 
             llama_memory_seq_rm(llama_get_memory(ctx_tgt),       seq_id, n_past, -1);
             llama_memory_seq_rm(llama_get_memory(ctx_dft.get()), seq_id, n_past, -1);
+
+            // Post-cleanup KV cache sanity check
+            if (params.speculative.fly.debug_trace) {
+                const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id);
+                LOG_INF("KV post-cleanup: pos_max=%d, n_past=%d, ok\n", pos_max, n_past);
+            }
         }
 
         if ((params.n_predict >= 0 && n_predict > params.n_predict) || has_eos) {

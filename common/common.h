@@ -344,6 +344,18 @@ struct common_params_speculative_ngram_cache {
     std::string lookup_cache_dynamic; // path of dynamic ngram cache file for lookup decoding
 };
 
+// FLy: Training-Free Loosely Speculative Decoding parameters
+//
+// FLy relaxes the exact-match verification of standard SPD by accepting
+// semantically correct drafts that differ from the target model's top-1.
+struct common_params_speculative_fly {
+    bool    enabled             = false;
+    float   ambiguity_threshold = 2.0f;    // margin threshold (equivalent to paper θ=0.3)
+    int32_t window_size         = 6;       // W — deferred window length
+    bool    enable_mla          = false;   // multi-level acceleration
+    bool    debug_trace         = false;   // verbose trace logging
+};
+
 struct common_params_speculative {
     std::vector<enum common_speculative_type> types = { COMMON_SPECULATIVE_TYPE_NONE };
 
@@ -356,6 +368,9 @@ struct common_params_speculative {
     common_params_speculative_ngram_map ngram_map_k4v;
 
     common_params_speculative_ngram_cache ngram_cache;
+
+    // FLy: Training-Free Loosely Speculative Decoding
+    common_params_speculative_fly fly;
 
     bool has_dft() const {
         return !draft.mparams.path.empty() || !draft.mparams.hf_repo.empty();

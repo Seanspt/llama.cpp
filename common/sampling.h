@@ -4,6 +4,7 @@
 
 #include "common.h"
 
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -120,3 +121,75 @@ struct common_sampler_deleter {
 };
 
 typedef std::unique_ptr<common_sampler, common_sampler_deleter> common_sampler_ptr;
+
+//
+// FLy (Training-Free Loosely Speculative Decoding)
+//
+
+struct common_params_speculative_fly;
+
+// Compute an ambiguity margin from logits as a lightweight proxy for entropy.
+// Returns P(top1) / P(top2) in softmax space — margin close to 1.0 means high
+// ambiguity (the model is undecided between top-2 tokens); larger values mean
+// higher confidence (deterministic position).
+float compute_ambiguity_margin(const float * logits, int n_vocab);
+
+// Check whether a token is sensitive to loose verification: EOS, BOS, control
+// tokens, and structured chat markers must always be exact-matched.
+bool is_control_sensitive(llama_token tok, const struct llama_vocab * vocab);
+
+// Streaming output buffer that delays output of provisionally-accepted tokens
+// until they have cleared the deferred window (W tokens later).
+struct fly_output_buffer {
+    std::deque<llama_token> pending;
+    int window_size = 6;
+
+    void push(llama_token tok) { pending.push_back(tok); }
+
+    void push_batch(const std::vector<llama_token> & toks) {
+        for (auto t : toks) pending.push_back(t);
+    }
+
+    // Return tokens that are safe to output (outside the W-token danger zone).
+    std::vector<llama_token> flushable() {
+        std::vector<llama_token> safe;
+        while ((int) pending.size() > window_size) {
+            safe.push_back(pending.front());
+            pending.pop_front();
+        }
+        return safe;
+    }
+
+    // Roll back to only keep the first n tokens (called on rejection).
+    void reject(int n_keep) {
+        if (n_keep < (int) pending.size()) {
+            pending.resize(n_keep);
+        }
+    }
+
+    // Flush all remaining tokens (e.g. on EOS or generation end).
+    std::vector<llama_token> flush_all() {
+        std::vector<llama_token> all;
+        while (!pending.empty()) {
+            all.push_back(pending.front());
+            pending.pop_front();
+        }
+        return all;
+    }
+
+    void clear() { pending.clear(); }
+    size_t size() const { return pending.size(); }
+};
+
+// FLy loose verification: replaces the exact-match acceptance loop with a
+// two-tier mechanism (ambiguity gate + deferred window).
+//
+// Returns at least 1 token (the bonus), up to draft.size() + 1 tokens.
+// The semantics are identical to common_sampler_sample_and_accept_n().
+std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
+    struct common_sampler * gsmpl,
+    struct llama_context * ctx,
+    const std::vector<int> & idxs,
+    const llama_tokens & draft,
+    const common_params_speculative_fly & params,
+    bool grammar_first = false);

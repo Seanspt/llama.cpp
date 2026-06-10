@@ -85,6 +85,9 @@ struct server_slot {
     std::vector<int32_t> spec_i_batch;
     common_prompt_checkpoint spec_ckpt;
 
+    // FLy: streaming output buffer for loosely speculative decoding
+    fly_output_buffer spec_fly_buffer;
+
     // TODO: move members that belong to the task (such as `generated_text`, `has_new_line`) to task_results_state
     //       see https://github.com/ggml-org/llama.cpp/pull/18283#issuecomment-3710175837
     std::unique_ptr<const server_task> task;
@@ -221,6 +224,7 @@ struct server_slot {
             spec_draft.clear();
             spec_i_batch.clear();
             spec_ckpt.clear();
+            spec_fly_buffer.clear();
         }
         generated_tokens.clear();
         generated_token_probs.clear();
@@ -2643,6 +2647,11 @@ private:
                             /* .result   = */ &slot.spec_draft,
                         };
 
+                        // configure FLy streaming buffer window size
+                        if (params_base.speculative.fly.enabled) {
+                            slot.spec_fly_buffer.window_size = params_base.speculative.fly.window_size;
+                        }
+
                         drafting.push_back(&slot);
                     }
                 }
@@ -3498,7 +3507,17 @@ private:
                     common_sampler_ptr smpl_save(common_sampler_clone(slot.smpl.get()));
 
                     GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
-                    auto accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
+
+                    // FLy or standard speculative verification
+                    std::vector<llama_token> accepted;
+                    if (params_base.speculative.fly.enabled) {
+                        accepted = common_sampler_sample_and_accept_n_fly(
+                            slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft,
+                            params_base.speculative.fly);
+                    } else {
+                        accepted = common_sampler_sample_and_accept_n(
+                            slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
+                    }
                     slot.spec_i_batch.clear();
 
                     GGML_ASSERT(accepted.size() >= 1);

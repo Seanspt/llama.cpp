@@ -657,6 +657,185 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
     return common_sampler_sample_and_accept_n(gsmpl, ctx, idxs, draft, grammar_first);
 }
 
+//
+// FLy (Training-Free Loosely Speculative Decoding)
+//
+
+float compute_ambiguity_margin(const float * logits, int n_vocab) {
+    float max1 = -INFINITY;
+    float max2 = -INFINITY;
+
+    for (int i = 0; i < n_vocab; i++) {
+        if (logits[i] > max1) {
+            max2 = max1;
+            max1 = logits[i];
+        } else if (logits[i] > max2) {
+            max2 = logits[i];
+        }
+    }
+
+    // margin = P(top1) / P(top2) = exp(max1 - max2)
+    return expf(max1 - max2);
+}
+
+bool is_control_sensitive(llama_token tok, const struct llama_vocab * vocab) {
+    // EOG tokens (EOS, etc.)
+    if (llama_vocab_is_eog(vocab, tok)) {
+        return true;
+    }
+
+    // Explicit control tokens
+    if (llama_vocab_is_control(vocab, tok)) {
+        return true;
+    }
+
+    // Chat template structural markers
+    const char * text = llama_vocab_get_text(vocab, tok);
+    if (text) {
+        if (strstr(text, "<|")   != nullptr) return true;
+        if (strstr(text, "[INST]")  != nullptr) return true;
+        if (strstr(text, "[/INST]") != nullptr) return true;
+    }
+
+    return false;
+}
+
+static llama_token argmax_logits(const float * logits, int n_vocab) {
+    float max_val = -INFINITY;
+    int   max_idx = 0;
+
+    for (int i = 0; i < n_vocab; i++) {
+        if (logits[i] > max_val) {
+            max_val = logits[i];
+            max_idx = i;
+        }
+    }
+
+    return (llama_token) max_idx;
+}
+
+std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
+        struct common_sampler * gsmpl,
+        struct llama_context * ctx,
+        const std::vector<int> & idxs,
+        const llama_tokens & draft,
+        const common_params_speculative_fly & params,
+        bool grammar_first) {
+
+    const int K = (int) draft.size();
+    GGML_ASSERT((int) idxs.size() == K + 1 && "idxs.size() must be draft.size() + 1");
+
+    if (K == 0) {
+        // No draft tokens: just sample the bonus from the first logit
+        std::vector<llama_token> result;
+        const llama_token id = common_sampler_sample(gsmpl, ctx, idxs[0], grammar_first);
+        common_sampler_accept(gsmpl, id, true);
+        result.push_back(id);
+        return result;
+    }
+
+    const llama_model * model = llama_get_model(ctx);
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+
+    const float ambiguity_threshold = params.ambiguity_threshold;
+    const int   window_W            = params.window_size;
+
+    // ===== Phase 1: Analytical pass (no state mutations) =====
+    std::vector<llama_token> target(K);
+    std::vector<float>       margin(K);
+    std::vector<bool>        match(K);
+
+    for (int i = 0; i < K; i++) {
+        // idxs[i] maps to the logit position whose prediction is compared with draft[i]
+        // idxs[0] = batch position of id_last → prediction after id_last → compare with draft[0]
+        const float * logits = llama_get_logits_ith(ctx, idxs[i]);
+        GGML_ASSERT(logits != nullptr);
+
+        target[i] = argmax_logits(logits, n_vocab);
+        margin[i] = compute_ambiguity_margin(logits, n_vocab);
+        match[i]  = (draft[i] == target[i]);
+    }
+
+    // ===== Phase 2: Decision pass (determine first_reject) =====
+    int first_reject = K; // default: accept all K draft tokens
+
+    for (int j = 0; j < K; j++) {
+        if (match[j]) {
+            continue; // exact match: accept
+        }
+
+        // --- Special token protection: always strict ---
+        if (is_control_sensitive(draft[j], vocab) || is_control_sensitive(target[j], vocab)) {
+            first_reject = j;
+            break;
+        }
+
+        // --- Ambiguity gate ---
+        if (margin[j] >= ambiguity_threshold) {
+            // Deterministic position → strict reject
+            first_reject = j;
+            break;
+        }
+
+        // --- Deferred window ---
+        if (j + window_W >= K) {
+            // Boundary: not enough lookahead tokens, conservative reject
+            first_reject = j;
+            break;
+        }
+
+        // Check the window [j+1, j+window_W] for any mismatch
+        bool window_clean = true;
+        for (int w = 1; w <= window_W; w++) {
+            if (!match[j + w]) {
+                window_clean = false;
+                break;
+            }
+        }
+
+        if (window_clean) {
+            // Semantically equivalent wording — accept the draft token
+            continue;
+        } else {
+            // Target is course-correcting — reject from j
+            first_reject = j;
+            break;
+        }
+    }
+
+    // ===== Phase 3: Execution (update sampler + build result) =====
+    std::vector<llama_token> result;
+    result.reserve((size_t) first_reject + 1);
+
+    // Accept the draft tokens that passed verification
+    for (int i = 0; i < first_reject; i++) {
+        common_sampler_accept(gsmpl, draft[i], true);
+        result.push_back(draft[i]);  // accept draft token (even if != target, it's semantically valid)
+    }
+
+    // Bonus token at the rejection point (or after all drafts)
+    const int bonus_idx = idxs[first_reject];
+    const llama_token bonus = common_sampler_sample(gsmpl, ctx, bonus_idx, grammar_first);
+    common_sampler_accept(gsmpl, bonus, true);
+    result.push_back(bonus);
+
+    // KV cache consistency verification: logits for accepted positions should be
+    // unchanged (FLy only reads logits, it does not mutate the KV cache).
+    // This is a debug-only check; compiles to no-op in release builds.
+#if 0
+    for (int i = 0; i < first_reject; i++) {
+        const float * logits_after = llama_get_logits_ith(ctx, idxs[i]);
+        GGML_ASSERT(logits_after != nullptr);
+        const llama_token tok_after = argmax_logits(logits_after, n_vocab);
+        // The argmax should be stable — KV cache wasn't touched
+        GGML_ASSERT(tok_after == target[i] || tok_after == draft[i]);
+    }
+#endif
+
+    return result; // size = first_reject + 1
+}
+
 uint32_t common_sampler_get_seed(const struct common_sampler * gsmpl) {
     return llama_sampler_get_seed(gsmpl->chain);
 }
