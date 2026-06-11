@@ -186,10 +186,15 @@ struct fly_output_buffer {
 //
 // Returns at least 1 token (the bonus), up to draft.size() + 1 tokens.
 // The semantics are identical to common_sampler_sample_and_accept_n().
+//
+// If stochastic is true (T>0), a cloned sampler is used in the analytical
+// phase to extract target tokens via the full sampling chain. If false (T=0),
+// argmax is used directly on raw logits — faster and deterministic.
 std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     struct common_sampler * gsmpl,
     struct llama_context * ctx,
     const std::vector<int> & idxs,
     const llama_tokens & draft,
     const common_params_speculative_fly & params,
-    bool grammar_first = false);
+    bool grammar_first = false,
+    bool stochastic      = false);

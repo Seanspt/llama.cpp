@@ -3511,9 +3511,10 @@ private:
                     // FLy or standard speculative verification
                     std::vector<llama_token> accepted;
                     if (params_base.speculative.fly.enabled) {
+                        const bool stochastic = slot.task && slot.task->params.sampling.temp > 0;
                         accepted = common_sampler_sample_and_accept_n_fly(
                             slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft,
-                            params_base.speculative.fly);
+                            params_base.speculative.fly, /* grammar_first */ false, stochastic);
                     } else {
                         accepted = common_sampler_sample_and_accept_n(
                             slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);

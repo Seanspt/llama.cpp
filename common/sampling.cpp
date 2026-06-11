@@ -737,7 +737,8 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         const std::vector<int> & idxs,
         const llama_tokens & draft,
         const common_params_speculative_fly & params,
-        bool grammar_first) {
+        bool grammar_first,
+        bool stochastic) {
 
     const int K = (int) draft.size();
     GGML_ASSERT((int) idxs.size() == K + 1 && "idxs.size() must be draft.size() + 1");
@@ -758,10 +759,22 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     const float ambiguity_threshold = params.ambiguity_threshold;
     const int   window_W            = params.window_size;
 
-    // ===== Phase 1: Analytical pass (no state mutations) =====
+    // ===== Phase 1: Analytical pass (no state mutations on gsmpl) =====
+    //
+    // For T=0 (greedy): extract target[i] via raw argmax — cheaper, no sampler overhead.
+    // For T>0 (stochastic): clone the sampler and use it to sample target[i] using the
+    //   full sampling chain (temperature, top-k, top-p, penalties, etc.). The clone
+    //   starts from the same penalty state as the real sampler, and its state evolves
+    //   independently as we accept each target[i]. This accurately simulates what the
+    //   real sampler would produce at each position.
     std::vector<llama_token> target(K);
     std::vector<float>       margin(K);
     std::vector<bool>        match(K);
+
+    common_sampler_ptr smpl_analytical;  // only used in stochastic mode
+    if (stochastic) {
+        smpl_analytical.reset(common_sampler_clone(gsmpl));
+    }
 
     for (int i = 0; i < K; i++) {
         // idxs[i] maps to the logit position whose prediction is compared with draft[i]
@@ -769,7 +782,13 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         const float * logits = llama_get_logits_ith(ctx, idxs[i]);
         GGML_ASSERT(logits != nullptr);
 
-        target[i] = argmax_logits(logits, n_vocab);
+        if (stochastic) {
+            target[i] = common_sampler_sample(smpl_analytical.get(), ctx, idxs[i], grammar_first);
+            common_sampler_accept(smpl_analytical.get(), target[i], true);
+        } else {
+            target[i] = argmax_logits(logits, n_vocab);
+        }
+
         margin[i] = compute_ambiguity_margin(logits, n_vocab);
         match[i]  = (draft[i] == target[i]);
     }

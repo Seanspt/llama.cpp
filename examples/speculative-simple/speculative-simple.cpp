@@ -254,7 +254,9 @@ int main(int argc, char ** argv) {
             for (size_t i = 0; i < fly_idxs.size(); i++) {
                 fly_idxs[i] = (int) i;
             }
-            ids = common_sampler_sample_and_accept_n_fly(smpl.get(), ctx_tgt, fly_idxs, draft, params.speculative.fly);
+            ids = common_sampler_sample_and_accept_n_fly(smpl.get(), ctx_tgt, fly_idxs, draft,
+                    params.speculative.fly, /* grammar_first */ false,
+                    /* stochastic */ params.sampling.temp > 0);
         } else {
             ids = common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft);
         }
