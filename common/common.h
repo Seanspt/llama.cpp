@@ -352,8 +352,8 @@ struct common_params_speculative_fly {
     bool    enabled             = false;
     // Margin threshold: reject when P(top1)/P(top2) >= this value.
     // Default 2.0 = reject when top-1 is at least twice as likely as top-2.
-    // Lower → more permissive (fewer strict rejects, higher acceleration).
-    // Higher → more conservative (closer to exact-match SPD).
+    // Lower  → more conservative (more strict rejects, closer to exact-match SPD).
+    // Higher → more permissive  (fewer strict rejects, higher acceleration).
     // Calibrated to approximate the paper's θ = 0.3 (normalized entropy gate):
     // logit gap ln(ambiguity_threshold) ≈ 0.69 roughly separates the
     // "ambiguous" from "deterministic" regime in typical transformer logit

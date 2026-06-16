@@ -245,8 +245,56 @@ int main(int argc, char ** argv) {
         llama_token token_id;
         std::string token_str;
 
+        // ── FLy verification (greedy T=0, single linear draft sequence) ──
+        // When FLy is enabled, replace the per-token exact-match loop with
+        // batched three-phase loose verification.  Uses the same batch-index
+        // source as the standard path (drafts[s_keep].i_batch_tgt).
+        bool fly_done = false;
+        if (params.speculative.fly.enabled && params.sampling.temp == 0) {
+            const int K = (int) drafts[s_keep].tokens.size();
+            if (K > 0) {
+                // idxs[i] = batch position whose logits predict draft[i].
+                // i_batch_tgt stores the pre-add batch token count for each
+                // draft position, matching what the standard path uses.
+                std::vector<int> fly_idxs(K + 1);
+                for (int i = 0; i < K; i++) {
+                    fly_idxs[i] = drafts[s_keep].i_batch_tgt[i];
+                }
+                fly_idxs[K] = K; // bonus token: logits at the last draft position
+
+                // stochastic=true even at T=0: the cloned-sampler path applies
+                // the full chain (penalties etc.), matching standard-path semantics.
+                std::vector<llama_token> accepted = common_sampler_sample_and_accept_n_fly(
+                    smpl, ctx_tgt, fly_idxs, drafts[s_keep].tokens,
+                    params.speculative.fly, /* grammar_first */ false, /* stochastic */ true);
+
+                // Emit accepted tokens and update counters
+                for (size_t i = 0; i < accepted.size(); i++) {
+                    const llama_token id = accepted[i];
+                    const std::string str = common_token_to_piece(ctx_tgt, id);
+                    if (i < accepted.size() - 1) { ++n_accept; }
+                    ++n_predict;
+                    if (llama_vocab_is_eog(vocab_tgt, id)) { has_eos = true; }
+                    LOG("%s", str.c_str());
+                }
+
+                // Update KV positions for accepted draft tokens only.
+                // The bonus token is NOT added here — it is used by the
+                // shared cleanup below to prime the draft model for the next
+                // round (matching standard-path behaviour where the mismatch
+                // token does not increment n_past_tgt).
+                n_past_tgt += (int) accepted.size() - 1;
+                n_past_dft += (int) accepted.size() - 1;
+
+                // Store the bonus token for next-round priming
+                token_id = accepted.back();
+                token_str = common_token_to_piece(ctx_tgt, token_id);
+                fly_done = true;
+            }
+        }
+
         // loop until we fail to accept a drafted token or we run out of drafted tokens
-        while (true) {
+        while (!fly_done) {
 
             // check if the target token matches any of the drafts
             // for stochastic sampling, attempt to match the token with the drafted tokens
@@ -430,7 +478,9 @@ int main(int argc, char ** argv) {
         }
 
         {
-            LOG_DBG("the sampled target token (%d, '%s') did not match, or we ran out of drafted tokens\n", token_id, token_str.c_str());
+            if (!fly_done) {
+                LOG_DBG("the sampled target token (%d, '%s') did not match, or we ran out of drafted tokens\n", token_id, token_str.c_str());
+            }
 
             // TODO: simplify
             {
@@ -469,6 +519,17 @@ int main(int argc, char ** argv) {
 
         if ((params.n_predict >= 0 && n_predict > params.n_predict) || has_eos) {
             break;
+        }
+
+        // KV cache sanity check — gated on FLy debug tracing
+        if (params.speculative.fly.debug_trace) {
+            const llama_pos pos_min = llama_memory_seq_pos_min(mem_tgt, 0);
+            const llama_pos pos_max = llama_memory_seq_pos_max(mem_tgt, 0);
+            if (pos_max < n_past_tgt - 1) {
+                LOG_ERR("KV cache TRUNCATED: pos_max=%d < n_past_tgt-1=%d\n", pos_max, n_past_tgt - 1);
+            }
+            LOG_INF("KV check: range [%d, %d], n_past_tgt=%d, accepted %d drafts, ok\n",
+                    pos_min, pos_max, n_past_tgt, n_accept);
         }
 
         if (drafts[0].smpl) {

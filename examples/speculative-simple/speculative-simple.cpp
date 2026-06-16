@@ -216,9 +216,19 @@ int main(int argc, char ** argv) {
         common_batch_clear(batch_tgt);
         common_batch_add  (batch_tgt, id_last, n_past++, { seq_id }, true);
 
+        // record batch indices for speculative verification.
+        // idxs[i] = batch position whose logits predict the (i+1)-th token in the batch:
+        //   idxs[0] → logits at id_last predict draft[0]
+        //   idxs[1] → logits at draft[0] predict draft[1]
+        //   ...
+        //   idxs[K] → logits at draft[K-1] predict the bonus token
+        std::vector<int> idxs(draft.size() + 1);
+        idxs[0] = 0;
+
         // evaluate the target model on [id_last, draft0, draft1, ..., draftN-1]
         {
             for (size_t i = 0; i < draft.size(); ++i) {
+                idxs[i + 1] = (int) (i + 1);
                 common_batch_add(batch_tgt, draft[i], n_past + i, { seq_id }, true);
             }
 
@@ -246,19 +256,18 @@ int main(int argc, char ** argv) {
         // available logits from the batch and sample the next token until we run out of logits or the sampler
         // disagrees with the draft
         //
-        // FLy or standard speculative verification
+        // FLy or standard speculative verification — both paths use the same
+        // batch indices recorded during target-batch construction above.
         std::vector<llama_token> ids;
         if (params.speculative.fly.enabled) {
-            // Build idxs = [0, 1, ..., draft.size()]
-            std::vector<int> fly_idxs(draft.size() + 1);
-            for (size_t i = 0; i < fly_idxs.size(); i++) {
-                fly_idxs[i] = (int) i;
-            }
-            ids = common_sampler_sample_and_accept_n_fly(smpl.get(), ctx_tgt, fly_idxs, draft,
+            // stochastic=true even at T=0: the standard path goes through the
+            // full sampler chain (penalties, etc.), so FLy must use the cloned
+            // sampler for analytical pass to match standard-path semantics.
+            ids = common_sampler_sample_and_accept_n_fly(smpl.get(), ctx_tgt, idxs, draft,
                     params.speculative.fly, /* grammar_first */ false,
-                    /* stochastic */ params.sampling.temp > 0);
+                    /* stochastic */ true);
         } else {
-            ids = common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft);
+            ids = common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, idxs, draft);
         }
 
         //LOG_DBG("ids: %s\n", string_from(ctx_tgt, ids).c_str());
