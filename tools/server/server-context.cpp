@@ -3548,11 +3548,9 @@ private:
                             // cycle that would otherwise occur when K <= W or when margin
                             // patterns repeat.
                             if (params_base.speculative.fly.enabled && accepted.size() >= 2) {
-                                accepted.pop_back(); // remove bonus token
-                                slot.spec_draft = std::move(accepted);
-                            } else {
-                                slot.spec_draft = std::move(accepted);
+                                accepted.pop_back();
                             }
+                            slot.spec_draft = std::move(accepted);
 
                             const auto & ckpt = slot.spec_ckpt;
 
@@ -3615,23 +3613,68 @@ private:
                     common_context_seq_rm(slot.ctx_dft, slot.id, slot.prompt.tokens.pos_next(), -1);
                 }
 
-                for (size_t i = 0; i < ids.size(); ++i) {
-                    completion_token_output result;
+                // FLy: push provisionally-accepted tokens into the output buffer.
+                // Although FLy's three-phase design makes final accept/reject
+                // decisions before any tokens reach this loop (so premature
+                // emission cannot occur in practice), the output buffer adds a
+                // defence-in-depth layer for future enhancements (e.g. cross-round
+                // deferred windows). Tokens are only emitted once they have
+                // cleared the W-token danger zone. On EOS/stop, remaining
+                // buffered tokens are flushed to the client.
+                if (params_base.speculative.fly.enabled) {
+                    slot.spec_fly_buffer.push_batch({ids.begin(), ids.end()});
+                } else {
+                    for (size_t i = 0; i < ids.size(); ++i) {
+                        completion_token_output result;
 
-                    result.tok          = ids[i];
-                    result.text_to_send = common_token_to_piece(slot.ctx_tgt, result.tok, accept_special_token(slot, result.tok));
-                    result.prob         = 1.0f; // set later
+                        result.tok          = ids[i];
+                        result.text_to_send = common_token_to_piece(slot.ctx_tgt, result.tok, accept_special_token(slot, result.tok));
+                        result.prob         = 1.0f; // set later
 
-                    // TODO: set result.probs
+                        // TODO: set result.probs
 
-                    slot.n_decoded += 1;
+                        slot.n_decoded += 1;
 
-                    if (!process_token(result, slot)) {
-                        slot.print_timings();
-                        send_final_response(slot);
-                        metrics.on_prediction(slot);
-                        slot.release();
+                        if (!process_token(result, slot)) {
+                            slot.print_timings();
+                            send_final_response(slot);
+                            metrics.on_prediction(slot);
+                            slot.release();
 
+                            break;
+                        }
+                    }
+                }
+
+                // FLy: emit tokens that have cleared the deferred window
+                if (params_base.speculative.fly.enabled) {
+                    bool stopped = false;
+                    for (auto tok : slot.spec_fly_buffer.flushable()) {
+                        completion_token_output result;
+                        result.tok          = tok;
+                        result.text_to_send = common_token_to_piece(slot.ctx_tgt, result.tok, accept_special_token(slot, result.tok));
+                        result.prob         = 1.0f;
+                        slot.n_decoded     += 1;
+
+                        if (!process_token(result, slot)) {
+                            // generation ended — flush all remaining buffered tokens
+                            for (auto rt : slot.spec_fly_buffer.flush_all()) {
+                                completion_token_output r2;
+                                r2.tok          = rt;
+                                r2.text_to_send = common_token_to_piece(slot.ctx_tgt, r2.tok, accept_special_token(slot, r2.tok));
+                                r2.prob         = 1.0f;
+                                slot.n_decoded += 1;
+                                process_token(r2, slot); // best-effort, ignore return
+                            }
+                            slot.print_timings();
+                            send_final_response(slot);
+                            metrics.on_prediction(slot);
+                            slot.release();
+                            stopped = true;
+                            break;
+                        }
+                    }
+                    if (stopped) {
                         break;
                     }
                 }

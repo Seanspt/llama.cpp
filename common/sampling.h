@@ -128,10 +128,15 @@ typedef std::unique_ptr<common_sampler, common_sampler_deleter> common_sampler_p
 
 struct common_params_speculative_fly;
 
-// Compute an ambiguity margin from logits as a lightweight proxy for entropy.
-// Returns P(top1) / P(top2) in softmax space — margin close to 1.0 means high
-// ambiguity (the model is undecided between top-2 tokens); larger values mean
-// higher confidence (deterministic position).
+// Lightweight proxy for the paper's normalized entropy h_j (see Algorithm 1).
+//
+// Returns P(top1) / P(top2), which equals exp(logit_max1 - logit_max2).
+//   ≈ 1.0  → top-1 and top-2 nearly tied (high ambiguity → defer)
+//   ≫ 1.0  → top-1 dominates (low ambiguity      → strict reject)
+//
+// Only requires one O(|V|) scan for the two largest logits, avoiding a full
+// softmax + entropy computation. See the implementation comment for the
+// calibration of ambiguity_threshold against the paper's θ.
 float compute_ambiguity_margin(const float * logits, int n_vocab);
 
 // Check whether a token is sensitive to loose verification: EOS, BOS, control

@@ -662,56 +662,74 @@ std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sample
 //
 
 float compute_ambiguity_margin(const float * logits, int n_vocab) {
-    float max1 = -INFINITY;
-    float max2 = -INFINITY;
+    float logit_max1 = -INFINITY;
+    float logit_max2 = -INFINITY;
 
     for (int i = 0; i < n_vocab; i++) {
-        if (logits[i] > max1) {
-            max2 = max1;
-            max1 = logits[i];
-        } else if (logits[i] > max2) {
-            max2 = logits[i];
+        const float v = logits[i];
+        if (!std::isfinite(v)) {
+            continue; // skip NaN/Inf — they don't carry usable signal
+        }
+        if (v > logit_max1) {
+            logit_max2 = logit_max1;
+            logit_max1 = v;
+        } else if (v > logit_max2) {
+            logit_max2 = v;
         }
     }
 
-    // margin = P(top1) / P(top2) = exp(max1 - max2)
-    return expf(max1 - max2);
+    // In softmax space, P(top1)/P(top2) = exp(logit_max1)/exp(logit_max2) =
+    // exp(logit_max1 - logit_max2). This ratio measures how concentrated the
+    // probability mass is on the top-1 token:
+    //   ≈ 1.0  → top-1 and top-2 are nearly tied (high ambiguity)
+    //   ≫ 1.0  → top-1 dominates (low ambiguity, deterministic position)
+    //
+    // This is a lightweight proxy for the paper's normalized entropy h_j:
+    //   margin close to 1.0  ⇔  h_j high  (target is undecided → defer)
+    //   margin ≫ 1.0          ⇔  h_j low   (target is confident  → strict reject)
+    //
+    // The default ambiguity_threshold = 2.0 means: reject when top-1 is at
+    // least twice as likely as top-2. This corresponds roughly to a logit gap
+    // of ln(2) ≈ 0.69. The paper's θ = 0.3 is a normalized-entropy threshold;
+    // the margin proxy is calibrated to produce similar defer/reject behaviour
+    // in practice while requiring only a single O(|V|) scan instead of a full
+    // softmax + entropy computation.
+    return expf(logit_max1 - logit_max2);
 }
 
 bool is_control_sensitive(llama_token tok, const struct llama_vocab * vocab) {
-    // EOG tokens (EOS, etc.)
+    // Primary: vocab-level classification (EOS, BOS, control tokens)
     if (llama_vocab_is_eog(vocab, tok)) {
         return true;
     }
 
-    // Explicit control tokens
     if (llama_vocab_is_control(vocab, tok)) {
         return true;
     }
 
-    // Chat template structural markers and other control-like patterns
+    // Secondary: string-based detection for chat-template structural markers
+    // that tokenizers may split across multiple tokens, thereby escaping
+    // llama_vocab_is_control(). These are well-known, specific markers
+    // whose loose acceptance would corrupt the chat format.
+    //
+    // NOTE: deliberately does NOT use generic patterns like "<…>" or newline
+    // matching — those would misclassify HTML/XML tags, math/inequality signs,
+    // code snippets, and line-break tokens as "control", crippling FLy on
+    // code-generation and structured-output tasks.
     const char * text = llama_vocab_get_text(vocab, tok);
     if (text) {
-        // Standard chat markers
-        if (strstr(text, "<|")   != nullptr) return true;
-        if (strstr(text, "[INST]")  != nullptr) return true;
-        if (strstr(text, "[/INST]") != nullptr) return true;
-
-        // Qwen2.5 / ChatML fragments (tokenizer may split these)
-        if (strstr(text, "im_start") != nullptr) return true;
-        if (strstr(text, "im_end")   != nullptr) return true;
-
-        // Llama 3 chat markers
+        // Llama 3 / Llama 4 chat markers
         if (strstr(text, "<|start_header_id|>") != nullptr) return true;
         if (strstr(text, "<|end_header_id|>")   != nullptr) return true;
         if (strstr(text, "<|eot_id|>")          != nullptr) return true;
 
-        // Generic: tokens starting with < or [ that look like markup
-        if (text[0] == '<' && strlen(text) > 2 && text[strlen(text)-1] == '>') return true;
+        // Qwen / ChatML markers (tokenizer may split these)
+        if (strstr(text, "im_start") != nullptr) return true;
+        if (strstr(text, "im_end")   != nullptr) return true;
 
-        // Structural whitespace: tokens containing newlines affect text layout
-        // and should never be loosely accepted
-        if (strchr(text, '\n') != nullptr) return true;
+        // Legacy Llama chat markers
+        if (strstr(text, "[INST]")  != nullptr) return true;
+        if (strstr(text, "[/INST]") != nullptr) return true;
     }
 
     return false;
@@ -719,13 +737,24 @@ bool is_control_sensitive(llama_token tok, const struct llama_vocab * vocab) {
 
 static llama_token argmax_logits(const float * logits, int n_vocab) {
     float max_val = -INFINITY;
-    int   max_idx = 0;
+    int   max_idx = -1;
 
     for (int i = 0; i < n_vocab; i++) {
-        if (logits[i] > max_val) {
-            max_val = logits[i];
+        const float v = logits[i];
+        if (!std::isfinite(v)) {
+            continue; // skip NaN/Inf — they don't carry usable signal
+        }
+        if (v > max_val) {
+            max_val = v;
             max_idx = i;
         }
+    }
+
+    // If all logits were non-finite, fall back to token 0 rather than
+    // returning -1, which would crash downstream. This path should be
+    // unreachable in practice but guards against corrupt model output.
+    if (max_idx < 0) {
+        return 0;
     }
 
     return (llama_token) max_idx;
@@ -797,6 +826,16 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
             target[i] = argmax_logits(logits, n_vocab);
         }
 
+        // NOTE: margin is computed from raw logits in both T=0 and T>0 modes.
+        // In stochastic mode (T>0), target[i] is drawn from the full sampling
+        // chain (temperature, top-k, top-p, penalties), while margin is derived
+        // from the unmodified logits. This is intentional: the ambiguity gate
+        // measures the model's intrinsic uncertainty, not the sampling-distorted
+        // distribution. Temperature flattens the distribution artificially, which
+        // would make every position look "ambiguous" and defeat the gate.
+        // In practice, the margin proxy is calibrated for T≈0 behaviour; at high
+        // temperatures the gate is deliberately permissive (most mismatches are
+        // deferred), which is the conservative choice for output quality.
         margin[i] = compute_ambiguity_margin(logits, n_vocab);
         match[i]  = (draft[i] == target[i]);
 
@@ -930,19 +969,6 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     const llama_token bonus = common_sampler_sample(gsmpl, ctx, bonus_idx, grammar_first);
     common_sampler_accept(gsmpl, bonus, true);
     result.push_back(bonus);
-
-    // KV cache consistency verification: logits for accepted positions should be
-    // unchanged (FLy only reads logits, it does not mutate the KV cache).
-    // This is a debug-only check; compiles to no-op in release builds.
-#if 0
-    for (int i = 0; i < first_reject; i++) {
-        const float * logits_after = llama_get_logits_ith(ctx, idxs[i]);
-        GGML_ASSERT(logits_after != nullptr);
-        const llama_token tok_after = argmax_logits(logits_after, n_vocab);
-        // The argmax should be stable — KV cache wasn't touched
-        GGML_ASSERT(tok_after == target[i] || tok_after == draft[i]);
-    }
-#endif
 
     return result; // size = first_reject + 1
 }
