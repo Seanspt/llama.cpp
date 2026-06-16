@@ -55,7 +55,8 @@ int main(int argc, char ** argv) {
     }
 
     // max number of parallel drafting sequences (i.e. tree branches)
-    const int n_seq_dft = params.n_parallel;
+    // FLy requires a single linear draft sequence — force single-seq when enabled.
+    const int n_seq_dft = params.speculative.fly.enabled ? 1 : params.n_parallel;
 
     // probability threshold for splitting a draft branch (only for n_seq_dft > 1)
     const float p_draft_split = params.speculative.draft.p_split;
@@ -245,28 +246,28 @@ int main(int argc, char ** argv) {
         llama_token token_id;
         std::string token_str;
 
-        // ── FLy verification (greedy T=0, single linear draft sequence) ──
-        // When FLy is enabled, replace the per-token exact-match loop with
-        // batched three-phase loose verification.  Uses the same batch-index
-        // source as the standard path (drafts[s_keep].i_batch_tgt).
+        // ── FLy verification ──
+        // Replace the per-token exact-match loop with batched three-phase
+        // loose verification.  Uses the same batch-index source as the
+        // standard path: drafts[s_keep].i_batch_tgt.
         bool fly_done = false;
-        if (params.speculative.fly.enabled && params.sampling.temp == 0) {
+        if (params.speculative.fly.enabled) {
             const int K = (int) drafts[s_keep].tokens.size();
             if (K > 0) {
-                // idxs[i] = batch position whose logits predict draft[i].
-                // i_batch_tgt stores the pre-add batch token count for each
-                // draft position, matching what the standard path uses.
+                // i_batch_tgt has K+1 entries: [0, 1, ..., K].
+                //   i_batch_tgt[i] = batch position whose logits predict draft[i]
+                //   i_batch_tgt[K] = batch position for the bonus token
+                // So we use the same array for all positions — no hardcoding.
+                GGML_ASSERT((int) drafts[s_keep].i_batch_tgt.size() == K + 1);
                 std::vector<int> fly_idxs(K + 1);
-                for (int i = 0; i < K; i++) {
+                for (int i = 0; i <= K; i++) {
                     fly_idxs[i] = drafts[s_keep].i_batch_tgt[i];
                 }
-                fly_idxs[K] = K; // bonus token: logits at the last draft position
 
-                // stochastic=true even at T=0: the cloned-sampler path applies
-                // the full chain (penalties etc.), matching standard-path semantics.
+                const bool stochastic = params.sampling.temp > 0;
                 std::vector<llama_token> accepted = common_sampler_sample_and_accept_n_fly(
                     smpl, ctx_tgt, fly_idxs, drafts[s_keep].tokens,
-                    params.speculative.fly, /* grammar_first */ false, /* stochastic */ true);
+                    params.speculative.fly, /* grammar_first */ false, stochastic);
 
                 // Emit accepted tokens and update counters
                 for (size_t i = 0; i < accepted.size(); i++) {
