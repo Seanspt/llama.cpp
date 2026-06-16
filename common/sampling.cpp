@@ -743,6 +743,11 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     const int K = (int) draft.size();
     GGML_ASSERT((int) idxs.size() == K + 1 && "idxs.size() must be draft.size() + 1");
 
+    if (params.debug_trace) {
+        LOG_INF("FLy ENTER: K=%d, stochastic=%d, thr=%.2f, W=%d\n",
+                K, (int) stochastic, (double) params.ambiguity_threshold, params.window_size);
+    }
+
     if (K == 0) {
         // No draft tokens: just sample the bonus from the first logit
         std::vector<llama_token> result;
@@ -777,10 +782,13 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     }
 
     for (int i = 0; i < K; i++) {
-        // idxs[i] maps to the logit position whose prediction is compared with draft[i]
         // idxs[0] = batch position of id_last → prediction after id_last → compare with draft[0]
         const float * logits = llama_get_logits_ith(ctx, idxs[i]);
-        GGML_ASSERT(logits != nullptr);
+        if (!logits) {
+            LOG_WRN("FLy: null logits at i=%d idx=%d, falling back to standard SPD\n", i, idxs[i]);
+            // fall back to standard exact-match verification
+            return common_sampler_sample_and_accept_n(gsmpl, ctx, idxs, draft, grammar_first);
+        }
 
         if (stochastic) {
             target[i] = common_sampler_sample(smpl_analytical.get(), ctx, idxs[i], grammar_first);
@@ -791,6 +799,14 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
 
         margin[i] = compute_ambiguity_margin(logits, n_vocab);
         match[i]  = (draft[i] == target[i]);
+
+        if (params.debug_trace) {
+            const char * dt = llama_vocab_get_text(vocab, draft[i]);
+            const char * tt = llama_vocab_get_text(vocab, target[i]);
+            const char * st = match[i] ? "MATCH" : "MISS";
+            LOG_INF("FLy-P1 i=%d draft[%s]=%d target[%s]=%d %s margin=%.2f\n",
+                    i, dt ? dt : "?", draft[i], tt ? tt : "?", target[i], st, (double)margin[i]);
+        }
     }
 
     // ===== Phase 2: Decision pass (determine first_reject) =====
@@ -802,9 +818,25 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         }
 
         // --- Special token protection: always strict ---
-        if (is_control_sensitive(draft[j], vocab) || is_control_sensitive(target[j], vocab)) {
-            first_reject = j;
-            break;
+        {
+            bool d_ctrl = is_control_sensitive(draft[j], vocab);
+            bool t_ctrl = is_control_sensitive(target[j], vocab);
+            if (d_ctrl || t_ctrl) {
+                if (params.debug_trace) {
+                    const char * dt = llama_vocab_get_text(vocab, draft[j]);
+                    const char * tt = llama_vocab_get_text(vocab, target[j]);
+                    LOG_INF("FLy CONTROL-REJECT pos %d: draft[%s]=%d ctrl=%d  target[%s]=%d ctrl=%d\n",
+                            j, dt ? dt : "?", draft[j], (int)d_ctrl, tt ? tt : "?", target[j], (int)t_ctrl);
+                    bool eog_d = llama_vocab_is_eog(vocab, draft[j]);
+                    bool eog_t = llama_vocab_is_eog(vocab, target[j]);
+                    bool vc_d = llama_vocab_is_control(vocab, draft[j]);
+                    bool vc_t = llama_vocab_is_control(vocab, target[j]);
+                    LOG_INF("FLy CONTROL-DETAIL: draft eog=%d vctrl=%d  target eog=%d vctrl=%d\n",
+                            (int)eog_d, (int)vc_d, (int)eog_t, (int)vc_t);
+                }
+                first_reject = j;
+                break;
+            }
         }
 
         // --- Ambiguity gate ---
@@ -823,7 +855,36 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
 
         // --- Deferred window ---
         if (j + window_W >= K) {
-            // Boundary: not enough lookahead tokens, conservative reject
+            // Boundary: not enough lookahead tokens.
+            //
+            // When the entire draft is shorter than or equal to the window
+            // (K <= W), every mismatch is trivially at the boundary. In
+            // this case conservative rejection is pointless — there are
+            // simply not enough tokens to look ahead. Accept the mismatch
+            // as semantic variation rather than rejecting it, which would
+            // otherwise create an infinite loop with checkpoint-based
+            // partial draft reuse.
+            //
+            // When K > W, a boundary mismatch at the tail of a long draft
+            // genuinely cannot be verified → conservative reject.
+            if (K <= window_W) {
+                // Draft is too short for a meaningful lookahead window.
+                // Accept this ambiguous mismatch.
+                if (params.debug_trace) {
+                    const char * draft_text = llama_vocab_get_text(vocab, draft[j]);
+                    const char * tgt_text   = llama_vocab_get_text(vocab, target[j]);
+                    LOG_INF("FLy DEFER-ACCEPT pos %d (short draft K=%d <= W=%d): draft='%s' (id=%d) != target='%s' (id=%d), margin=%.2f\n",
+                            j, K, window_W,
+                            draft_text ? draft_text : "?", draft[j],
+                            tgt_text   ? tgt_text   : "?", target[j], (double) margin[j]);
+                }
+                continue;
+            }
+            // Long draft near end: conservative reject
+            if (params.debug_trace) {
+                LOG_INF("FLy BOUNDARY-REJECT pos %d: j+W=%d >= K=%d, margin=%.2f\n",
+                        j, j + window_W, K, (double) margin[j]);
+            }
             first_reject = j;
             break;
         }

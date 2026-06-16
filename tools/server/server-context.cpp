@@ -3537,7 +3537,22 @@ private:
                             }
 
                             // partial acceptance is not supported by the context -> truncate the draft and restore the state
-                            slot.spec_draft = std::move(accepted);
+                            //
+                            // FLy: strip the bonus token from the partial draft.
+                            // The bonus was sampled at the rejection point and, unlike
+                            // exact-match SPD, may not be consistent with the draft model's
+                            // predictions when reprocessed (the context shifts because the
+                            // rejected token is replaced by the bonus). Keeping only the
+                            // already-accepted draft tokens allows them to be re-verified
+                            // deterministically, breaking the infinite checkpoint-restore
+                            // cycle that would otherwise occur when K <= W or when margin
+                            // patterns repeat.
+                            if (params_base.speculative.fly.enabled && accepted.size() >= 2) {
+                                accepted.pop_back(); // remove bonus token
+                                slot.spec_draft = std::move(accepted);
+                            } else {
+                                slot.spec_draft = std::move(accepted);
+                            }
 
                             const auto & ckpt = slot.spec_ckpt;
 

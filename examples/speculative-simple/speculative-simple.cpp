@@ -271,7 +271,14 @@ int main(int argc, char ** argv) {
         if (use_ckpt_tgt && ids.size() - 1 < draft.size()) {
             LOG_DBG("partial acceptance: %zu < %zu, restoring checkpoint\n", ids.size() - 1, draft.size());
 
-            draft = std::move(ids);
+            // FLy: strip the bonus token to avoid infinite checkpoint-restore cycles
+            // (same rationale as server-context.cpp fix)
+            if (params.speculative.fly.enabled && ids.size() >= 2) {
+                ids.pop_back(); // drop bonus, keep only accepted draft tokens
+                draft = std::move(ids);
+            } else {
+                draft = std::move(ids);
+            }
 
             {
                 ckpt.load_tgt(ctx_tgt, seq_id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
