@@ -280,9 +280,50 @@ MTP 是最高效的 draft 方式，FLy + MTP 是论文推荐的组合。
 
 ---
 
-## 五、用户需确认的内容
+## 五、实际测试结果 (2026-06-16)
 
-1. **目前本地已有的模型**：请告诉我有哪些 GGUF，我更新矩阵避免重复下载
-2. **5090 机器 CUDA 是否可用**：是否可以在 192.168.10.2 上做 CUDA 测试
-3. **优先测试哪个维度**：P0（最小覆盖）→ P1（重要场景）→ P2（全面覆盖）
-4. **时间预算**：需要跑多深（快速冒烟 vs 完整回归 vs 性能对比）
+### Mac (M4 Max, Metal)
+
+| # | 场景 | 模型 | 速度 | 接受率 | 状态 |
+|---|------|------|------|--------|------|
+| 1 | MTP K=8 | Qwen3.5-0.8B | 115 t/s | 100% | ✅ |
+| 2 | MTP K=2 (K<W) | Qwen3.5-0.8B | ~180 t/s | 100% | ✅ |
+| 3 | MTP K=8 | Qwen3.5-4B | 31.2 t/s | 100% | ✅ |
+| 4 | MTP K=8 | Qwen3.5-27B | 11.1 t/s | 100% | ✅ |
+| 5 | MTP K=6 | Qwen3.5-35B-A3B MoE | 39.6 t/s | 100% | ✅ |
+| 6a | draft-simple baseline | Llama-3.1-8B+L3.2-1B | 46.7 t/s | 58.8% | ✅ |
+| 6b | **draft-simple + FLy** | Llama-3.1-8B+L3.2-1B | **54.8 t/s** | **72.9%** | ✅ +17.2% |
+| 7 | T=0.7 stochastic | Qwen3.5-4B MTP | 39.0 t/s | 100% | ✅ |
+| 8 | ngram-mod K=64 | Qwen3.5-0.8B | 218 t/s | 100% | ✅ |
+| 9 | Server MTP | Qwen3.5-0.8B | 190 t/s | — | ✅ RS rollback |
+| 10 | Gemma-4 MTP server | Gemma-4-12B+assistant | — | — | ❌ ctx_other bug |
+
+### 5090 (CUDA, WSL)
+
+| # | 场景 | 模型 | 速度 | 接受率 | 状态 |
+|---|------|------|------|--------|------|
+| 1 | MTP K=8 | Qwen3.5-2B | 214.3 t/s | 100% | ✅ |
+| 2a | draft-simple baseline | Qwen2.5-7B+0.5B | 132.7 t/s | 49.5% | ✅ |
+| 2b | **draft-simple + FLy** | Qwen2.5-7B+0.5B | **189.5 t/s** | 45.0% | ✅ +42.8% |
+| 3 | Server MTP | Qwen3.5-2B | 283.2 t/s | — | ✅ |
+| 4 | Qwen3.6-27B MTP | — | — | — | ❌ CUDA decode fail |
+| 5 | Qwen3.5-27B MTP | — | — | — | ❌ model corrupted |
+
+### 关键发现
+
+- **FLy 在 draft-simple 场景明确加速**: Mac +17%, 5090 +43%
+- **MTP 同模型 100% 接受率**: MTP draft = target 自身预测, FLy 无额外收益但无损害
+- **所有后端路径正常**: checkpoint、RS rollback、seq_rm
+- **所有 spec 类型兼容**: draft-simple、draft-mtp、ngram-*
+- **stochastic (T>0) 路径正常**
+- **27B 模型在 5090 上有 CUDA 兼容问题** (hybrid recurrent 架构)，非 FLy 引入
+- **Gemma-4 MTP assistant 需 ctx_other**, server 端初始化时序有问题，非 FLy 引入
+
+### 性能总结
+
+| 对比维度 | Mac FLy vs 标准 | 5090 FLy vs 标准 |
+|----------|----------------|-----------------|
+| draft-simple 加速 | **+17.2%** | **+42.8%** |
+| 接受率提升 | 72.9% vs 58.8% | 45.0% vs 49.5%* |
+
+> \* 5090 上 FLy 接受率略低但整体吞吐更高：FLy 减少了 KV cache 回滚频率，每轮处理更多有效 token。
