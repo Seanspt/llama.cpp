@@ -85,11 +85,6 @@ struct server_slot {
     std::vector<int32_t> spec_i_batch;
     common_prompt_checkpoint spec_ckpt;
 
-    // FLy: reserved for future cross-round deferred window support.
-    // Currently unused — FLy's three-phase design makes final accept/reject
-    // decisions before tokens reach the output loop, so no buffering is needed.
-    fly_output_buffer spec_fly_buffer;
-
     // TODO: move members that belong to the task (such as `generated_text`, `has_new_line`) to task_results_state
     //       see https://github.com/ggml-org/llama.cpp/pull/18283#issuecomment-3710175837
     std::unique_ptr<const server_task> task;
@@ -2647,7 +2642,6 @@ private:
                             /* .prompt   = */ &slot.spec_prompt,
                             /* .result   = */ &slot.spec_draft,
                         };
-
 
                         drafting.push_back(&slot);
                     }
