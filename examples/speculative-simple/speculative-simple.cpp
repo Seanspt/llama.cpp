@@ -305,19 +305,16 @@ int main(int argc, char ** argv) {
         n_accept  += ids.size() - 1;
         n_predict += ids.size();
 
-        // KV cache sanity check: verify the cache covers up to n_past
-        // Note: with cache defrag/shift, pos_min may not be 0, so we
-        // check that pos_max >= n_past - 1 (the cache extends to current position)
-        {
+        // KV cache sanity check: verify the cache covers up to n_past.
+        // This is a debug-only invariant check, gated on FLy debug tracing.
+        if (params.speculative.fly.debug_trace) {
             const llama_pos pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), seq_id);
             const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id);
             if (pos_max < n_past - 1) {
                 LOG_ERR("KV cache TRUNCATED: pos_max=%d < n_past-1=%d\n", pos_max, n_past - 1);
             }
-            if (params.speculative.fly.debug_trace) {
-                LOG_INF("KV check: range [%d, %d], n_past=%d, accepted %zu drafts, ok\n",
-                        pos_min, pos_max, n_past, ids.size() - 1);
-            }
+            LOG_INF("KV check: range [%d, %d], n_past=%d, accepted %zu drafts, ok\n",
+                    pos_min, pos_max, n_past, ids.size() - 1);
         }
 
         // process the accepted tokens and update contexts

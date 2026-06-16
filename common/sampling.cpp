@@ -707,10 +707,19 @@ bool is_control_sensitive(llama_token tok, const struct llama_vocab * vocab) {
         return true;
     }
 
-    // Secondary: string-based detection for chat-template structural markers
-    // that tokenizers may split across multiple tokens, thereby escaping
-    // llama_vocab_is_control(). These are well-known, specific markers
-    // whose loose acceptance would corrupt the chat format.
+    // Chat-template structural markers (e.g. <|im_start|>, <|start_header_id|>)
+    // are tagged LLAMA_TOKEN_ATTR_USER_DEFINED in well-formed GGUF metadata.
+    // This catches them with a single bit test instead of falling through to
+    // the strstr path below.
+    if (llama_vocab_get_attr(vocab, tok) & LLAMA_TOKEN_ATTR_USER_DEFINED) {
+        return true;
+    }
+
+    // Fallback: string-based detection for the same markers when the GGUF
+    // metadata does not correctly tag them as USER_DEFINED (common in older
+    // or community-quantized models). The tokenizer may split these across
+    // multiple sub-tokens, so individual fragments won't match the full
+    // marker string — we match the distinctive substrings.
     //
     // NOTE: deliberately does NOT use generic patterns like "<…>" or newline
     // matching — those would misclassify HTML/XML tags, math/inequality signs,
@@ -827,15 +836,25 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         }
 
         // NOTE: margin is computed from raw logits in both T=0 and T>0 modes.
+        // Temperature / top-k / top-p are applied inside the sampling chain
+        // and do not modify the raw logits returned by llama_get_logits_ith(),
+        // so margin[j] is identical regardless of temperature.
+        //
         // In stochastic mode (T>0), target[i] is drawn from the full sampling
-        // chain (temperature, top-k, top-p, penalties), while margin is derived
-        // from the unmodified logits. This is intentional: the ambiguity gate
-        // measures the model's intrinsic uncertainty, not the sampling-distorted
-        // distribution. Temperature flattens the distribution artificially, which
-        // would make every position look "ambiguous" and defeat the gate.
-        // In practice, the margin proxy is calibrated for T≈0 behaviour; at high
-        // temperatures the gate is deliberately permissive (most mismatches are
-        // deferred), which is the conservative choice for output quality.
+        // chain and is therefore more likely to diverge from draft[i] than at
+        // T=0. This produces more mismatches overall, which makes the deferred
+        // window check (window_clean) harder to satisfy — subsequent positions
+        // are also more likely to mismatch. The net effect is that FLy's
+        // acceptance advantage shrinks as temperature increases, and at high T
+        // standard exact-match SPD may be faster (more strict rejects → shorter
+        // accepted runs → more forward passes).
+        //
+        // This is an inherent limitation of using a deterministic margin proxy
+        // with stochastic targets. The paper evaluates FLy primarily at T≈0;
+        // for high-temperature generation, the ambiguity gate is simply less
+        // effective, not unsafe. Output quality is unaffected because any token
+        // accepted through the deferred window was verified to be semantically
+        // consistent (clean window) with the target's own subsequent predictions.
         margin[i] = compute_ambiguity_margin(logits, n_vocab);
         match[i]  = (draft[i] == target[i]);
 

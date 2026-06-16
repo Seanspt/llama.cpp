@@ -143,8 +143,18 @@ float compute_ambiguity_margin(const float * logits, int n_vocab);
 // tokens, and structured chat markers must always be exact-matched.
 bool is_control_sensitive(llama_token tok, const struct llama_vocab * vocab);
 
-// Streaming output buffer that delays output of provisionally-accepted tokens
-// until they have cleared the deferred window (W tokens later).
+// Streaming output buffer for cross-round loosely speculative decoding.
+//
+// Currently unused in the main output path — FLy's three-phase design makes
+// final accept/reject decisions before tokens reach the output loop, so no
+// buffering or delayed emission is needed within a single round. This struct
+// is retained as infrastructure for future enhancements that may require
+// deferring output across round boundaries (e.g. stochastic window extension
+// or multi-round deferred windows).
+//
+// If reactivated: push tokens via push()/push_batch(), poll flushable() for
+// tokens that have cleared the danger zone, and call reject(n_keep) on
+// rollback and flush_all() on generation end.
 struct fly_output_buffer {
     std::deque<llama_token> pending;
     int window_size = 6;
