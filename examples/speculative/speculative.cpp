@@ -199,6 +199,8 @@ int main(int argc, char ** argv) {
     int n_drafted = 0;
     int n_accept  = 0;
 
+    common_fly_stats fly_stats;  // accumulated across all verification steps
+
     int n_past_tgt = inp.size();
     int n_past_dft = inp.size();
 
@@ -267,7 +269,8 @@ int main(int argc, char ** argv) {
                 const bool stochastic = params.sampling.temp > 0;
                 std::vector<llama_token> accepted = common_sampler_sample_and_accept_n_fly(
                     smpl, ctx_tgt, fly_idxs, drafts[s_keep].tokens,
-                    params.speculative.fly, /* grammar_first */ false, stochastic);
+                    params.speculative.fly, /* grammar_first */ false, stochastic,
+                    &fly_stats);
 
                 // Emit accepted tokens and update counters
                 for (size_t i = 0; i < accepted.size(); i++) {
@@ -697,6 +700,23 @@ int main(int argc, char ** argv) {
     LOG_INF("n_drafted = %d\n", n_drafted);
     LOG_INF("n_accept  = %d\n", n_accept);
     LOG_INF("accept    = %.3f%%\n", 100.0f * n_accept / n_drafted);
+
+    if (params.speculative.fly.enabled) {
+        LOG_INF("\n");
+        LOG_INF("── FLy verification stats ──\n");
+        LOG_INF("total_draft        = %d\n", fly_stats.n_total_draft);
+        LOG_INF("n_exact_match      = %d\n", fly_stats.n_total_match);
+        LOG_INF("n_loose_accept     = %d\n", fly_stats.n_loose_accept);
+        LOG_INF("n_strict_reject    = %d\n", fly_stats.n_strict_reject);
+        LOG_INF("n_control_reject   = %d\n", fly_stats.n_control_reject);
+        LOG_INF("n_window_reject    = %d\n", fly_stats.n_window_reject);
+        LOG_INF("n_boundary_reject  = %d\n", fly_stats.n_boundary_reject);
+        LOG_INF("avg_delta_logp     = %.4f\n", (double)fly_stats.avg_delta_logp());
+        LOG_INF("sum_delta_logp     = %.4f\n", fly_stats.sum_delta_logp);
+        LOG_INF("n_delta_logp       = %d\n",   fly_stats.n_delta_logp);
+        LOG_INF("loose_accept_rate  = %.1f%%\n",
+                100.0f * fly_stats.n_loose_accept / std::max(fly_stats.n_total_draft, 1));
+    }
 
     LOG_INF("\n");
     LOG_INF("draft:\n\n");

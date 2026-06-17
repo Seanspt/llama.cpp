@@ -127,6 +127,53 @@ typedef std::unique_ptr<common_sampler, common_sampler_deleter> common_sampler_p
 
 struct common_params_speculative_fly;
 
+// Per-step FLy verification statistics.
+// Callers accumulate across steps to get aggregate counts.
+struct common_fly_stats {
+    int n_loose_accept   = 0;  // mismatch accepted via deferred window
+    int n_strict_reject   = 0;  // margin >= threshold
+    int n_control_reject  = 0;  // special-token hard block
+    int n_window_reject   = 0;  // window contained another mismatch
+    int n_boundary_reject = 0;  // not enough lookahead (K > W)
+    int n_total_draft     = 0;  // total draft tokens processed
+    int n_total_match     = 0;  // total exact matches
+
+    // ΔlogP = log P(target_top1) - log P(draft_token)
+    // Positive value means the target model preferred its own top-1 over the
+    // draft token. Loose-accepted tokens carry non-zero ΔlogP — this is the
+    // probability mass "given up" for acceleration.
+    double sum_delta_logp = 0.0;
+    int    n_delta_logp   = 0;
+
+    float avg_delta_logp() const {
+        return n_delta_logp > 0 ? (float)(sum_delta_logp / n_delta_logp) : 0.0f;
+    }
+
+    void merge(const common_fly_stats & other) {
+        n_loose_accept   += other.n_loose_accept;
+        n_strict_reject   += other.n_strict_reject;
+        n_control_reject  += other.n_control_reject;
+        n_window_reject   += other.n_window_reject;
+        n_boundary_reject += other.n_boundary_reject;
+        n_total_draft     += other.n_total_draft;
+        n_total_match     += other.n_total_match;
+        sum_delta_logp    += other.sum_delta_logp;
+        n_delta_logp      += other.n_delta_logp;
+    }
+
+    void reset() {
+        n_loose_accept   = 0;
+        n_strict_reject   = 0;
+        n_control_reject  = 0;
+        n_window_reject   = 0;
+        n_boundary_reject = 0;
+        n_total_draft     = 0;
+        n_total_match     = 0;
+        sum_delta_logp    = 0.0;
+        n_delta_logp      = 0;
+    }
+};
+
 // Lightweight proxy for the paper's normalized entropy h_j (see Algorithm 1).
 //
 // Returns P(top1) / P(top2), which equals exp(logit_max1 - logit_max2).
@@ -158,4 +205,5 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     const llama_tokens & draft,
     const common_params_speculative_fly & params,
     bool grammar_first = false,
-    bool stochastic      = false);
+    bool stochastic      = false,
+    common_fly_stats * stats = nullptr);

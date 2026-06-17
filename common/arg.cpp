@@ -3810,6 +3810,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
+        {"--spec-fly-delta-threshold"}, "N",
+        string_format("FLy ΔlogP gate threshold, 0=disabled (default: %.2f)", params.speculative.fly.delta_logp_threshold),
+        [](common_params & params, const std::string & value) {
+            params.speculative.fly.delta_logp_threshold = std::stof(value);
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
         {"--spec-fly-window"}, "N",
         string_format("FLy deferred window size (default: %d)", params.speculative.fly.window_size),
         [](common_params & params, int value) {

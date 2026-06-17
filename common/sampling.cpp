@@ -776,10 +776,17 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         const llama_tokens & draft,
         const common_params_speculative_fly & params,
         bool grammar_first,
-        bool stochastic) {
+        bool stochastic,
+        common_fly_stats * stats) {
 
     const int K = (int) draft.size();
     GGML_ASSERT((int) idxs.size() == K + 1 && "idxs.size() must be draft.size() + 1");
+
+    common_fly_stats local_stats; // per-step counts (never reset accumulated stats)
+    common_fly_stats * st = stats ? &local_stats : nullptr;
+    if (st) {
+        st->n_total_draft = K;
+    }
 
     if (params.debug_trace) {
         LOG_INF("FLy ENTER: K=%d, stochastic=%d, thr=%.2f, W=%d\n",
@@ -799,8 +806,10 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const int n_vocab = llama_vocab_n_tokens(vocab);
 
-    const float ambiguity_threshold = params.ambiguity_threshold;
-    const int   window_W            = params.window_size;
+    const float ambiguity_threshold  = params.ambiguity_threshold;
+    const float delta_logp_threshold = params.delta_logp_threshold;
+    const bool  use_delta_logp_gate  = (delta_logp_threshold > 0.0f);
+    const int   window_W             = params.window_size;
 
     // ===== Phase 1: Analytical pass (no state mutations on gsmpl) =====
     //
@@ -813,6 +822,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     std::vector<llama_token> target(K);
     std::vector<float>       margin(K);
     std::vector<bool>        match(K);
+    std::vector<float>       delta_logp(K, 0.0f);  // log P(target) - log P(draft), >= 0
 
     common_sampler_ptr smpl_analytical;  // only used in stochastic mode
     if (stochastic) {
@@ -858,6 +868,22 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         margin[i] = compute_ambiguity_margin(logits, n_vocab);
         match[i]  = (draft[i] == target[i]);
 
+        // Accumulate match count for stats
+        if (match[i]) {
+            if (st) { st->n_total_match++; }
+        }
+
+        // ΔlogP = log P(target_top1) - log P(draft_token)
+        // In logit space this is simply logit_target - logit_draft because the
+        // softmax normalisation constant Z cancels out.
+        if (!match[i] && st) {
+            const float logit_draft  = logits[draft[i]];
+            const float logit_target = logits[target[i]];
+            if (std::isfinite(logit_draft) && std::isfinite(logit_target)) {
+                delta_logp[i] = logit_target - logit_draft;
+            }
+        }
+
         if (params.debug_trace) {
             const char * dt = llama_vocab_get_text(vocab, draft[i]);
             const char * tt = llama_vocab_get_text(vocab, target[i]);
@@ -892,21 +918,35 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                     LOG_INF("FLy CONTROL-DETAIL: draft eog=%d vctrl=%d  target eog=%d vctrl=%d\n",
                             (int)eog_d, (int)vc_d, (int)eog_t, (int)vc_t);
                 }
+                if (st) { st->n_control_reject++; }
                 first_reject = j;
                 break;
             }
         }
 
         // --- Ambiguity gate ---
-        if (margin[j] >= ambiguity_threshold) {
-            // Deterministic position → strict reject
-            if (params.debug_trace) {
+        // Two modes:
+        //   1. ΔlogP gate (delta_logp_threshold > 0):
+        //      reject when log P_target(top1) - log P_target(draft) >= τ.
+        //      This directly measures how much worse the draft token is.
+        //   2. Margin gate (default):
+        //      reject when P(top1)/P(top2) >= threshold (distribution too peaked).
+        bool gate_reject = false;
+        if (use_delta_logp_gate) {
+            gate_reject = (delta_logp[j] >= delta_logp_threshold);
+        } else {
+            gate_reject = (margin[j] >= ambiguity_threshold);
+            if (params.debug_trace && gate_reject) {
                 const char * draft_text = llama_vocab_get_text(vocab, draft[j]);
                 const char * tgt_text   = llama_vocab_get_text(vocab, target[j]);
                 LOG_INF("FLy STRICT-REJECT pos %d: draft='%s' != target='%s', margin=%.2f >= %.2f\n",
                         j, draft_text ? draft_text : "?", tgt_text ? tgt_text : "?",
                         (double) margin[j], (double) ambiguity_threshold);
             }
+        }
+
+        if (gate_reject) {
+            if (st) { st->n_strict_reject++; }
             first_reject = j;
             break;
         }
@@ -935,6 +975,28 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                             j, K, window_W,
                             draft_text ? draft_text : "?", draft[j],
                             tgt_text   ? tgt_text   : "?", target[j], (double) margin[j]);
+                    // Structured loose-accept record for harmlessness analysis
+                    LOG_INF("FLY-LOOSE: pos=%d draft=\"%s\"(%d) target=\"%s\"(%d) delta_logp=%.4f margin=%.2f window_clean=1 short_draft=1\n",
+                            j,
+                            draft_text ? draft_text : "?", draft[j],
+                            tgt_text   ? tgt_text   : "?", target[j],
+                            (double)delta_logp[j], (double)margin[j]);
+                }
+                // ΔlogP gate: even short-draft accepts must respect τ
+                if (use_delta_logp_gate && delta_logp[j] >= delta_logp_threshold) {
+                    if (params.debug_trace) {
+                        LOG_INF("FLy DLP-KILL-SHORT: pos=%d delta_logp=%.4f >= τ=%.2f, rejecting despite short draft\n",
+                                j, (double)delta_logp[j], (double)delta_logp_threshold);
+                    }
+                    if (st) { st->n_strict_reject++; }
+                    first_reject = j;
+                    break;
+                }
+
+                if (st) {
+                    st->n_loose_accept++;
+                    st->sum_delta_logp += (double)delta_logp[j];
+                    st->n_delta_logp++;
                 }
                 continue;
             }
@@ -943,6 +1005,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                 LOG_INF("FLy BOUNDARY-REJECT pos %d: j+W=%d >= K=%d, margin=%.2f\n",
                         j, j + window_W, K, (double) margin[j]);
             }
+            if (st) { st->n_boundary_reject++; }
             first_reject = j;
             break;
         }
@@ -957,6 +1020,22 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         }
 
         if (window_clean) {
+            // ΔlogP gate: even clean-window accepts must respect τ
+            if (use_delta_logp_gate && delta_logp[j] >= delta_logp_threshold) {
+                if (params.debug_trace) {
+                    const char * draft_text = llama_vocab_get_text(vocab, draft[j]);
+                    const char * tgt_text   = llama_vocab_get_text(vocab, target[j]);
+                    LOG_INF("FLy DLP-KILL-WINDOW: pos=%d draft=\"%s\"(%d) target=\"%s\"(%d) delta_logp=%.4f >= τ=%.2f, rejecting despite clean window\n",
+                            j,
+                            draft_text ? draft_text : "?", draft[j],
+                            tgt_text   ? tgt_text   : "?", target[j],
+                            (double)delta_logp[j], (double)delta_logp_threshold);
+                }
+                if (st) { st->n_strict_reject++; }
+                first_reject = j;
+                break;
+            }
+
             // Semantically equivalent wording — accept the draft token
             if (params.debug_trace) {
                 const char * draft_text = llama_vocab_get_text(vocab, draft[j]);
@@ -964,10 +1043,22 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                 LOG_INF("FLy DEFER-ACCEPT pos %d: draft='%s' (id=%d) != target='%s' (id=%d), margin=%.2f\n",
                         j, draft_text ? draft_text : "?", draft[j],
                         tgt_text   ? tgt_text   : "?", target[j], (double) margin[j]);
+                // Structured loose-accept record for harmlessness analysis
+                LOG_INF("FLY-LOOSE: pos=%d draft=\"%s\"(%d) target=\"%s\"(%d) delta_logp=%.4f margin=%.2f window_clean=1 short_draft=0\n",
+                        j,
+                        draft_text ? draft_text : "?", draft[j],
+                        tgt_text   ? tgt_text   : "?", target[j],
+                        (double)delta_logp[j], (double)margin[j]);
+            }
+            if (st) {
+                st->n_loose_accept++;
+                st->sum_delta_logp += (double)delta_logp[j];
+                st->n_delta_logp++;
             }
             continue;
         } else {
             // Target is course-correcting — reject from j
+            if (st) { st->n_window_reject++; }
             first_reject = j;
             break;
         }
@@ -988,6 +1079,11 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     const llama_token bonus = common_sampler_sample(gsmpl, ctx, bonus_idx, grammar_first);
     common_sampler_accept(gsmpl, bonus, true);
     result.push_back(bonus);
+
+    // Merge per-step stats into the caller's accumulator
+    if (stats) {
+        stats->merge(local_stats);
+    }
 
     return result; // size = first_reject + 1
 }

@@ -350,15 +350,21 @@ struct common_params_speculative_ngram_cache {
 // semantically correct drafts that differ from the target model's top-1.
 struct common_params_speculative_fly {
     bool    enabled             = false;
-    // Margin threshold: reject when P(top1)/P(top2) >= this value.
+
+    // ── Ambiguity gate (margin-based, original FLy) ──
+    // Reject when P(top1)/P(top2) >= this value.
     // Default 2.0 = reject when top-1 is at least twice as likely as top-2.
     // Lower  → more conservative (more strict rejects, closer to exact-match SPD).
     // Higher → more permissive  (fewer strict rejects, higher acceleration).
-    // Calibrated to approximate the paper's θ = 0.3 (normalized entropy gate):
-    // logit gap ln(ambiguity_threshold) ≈ 0.69 roughly separates the
-    // "ambiguous" from "deterministic" regime in typical transformer logit
-    // distributions.
     float   ambiguity_threshold = 2.0f;
+
+    // ── Absolute ΔlogP gate (replaces margin gate when enabled) ──
+    // If > 0, the ambiguity gate uses ΔlogP = log P_target(top1) - log P_target(draft)
+    // instead of the margin proxy.  Reject when ΔlogP >= this value.
+    // tau = 0.2 → draft token must have ≥ exp(-0.2) ≈ 82% of top-1's probability.
+    // 0 = disabled (use margin gate).
+    float   delta_logp_threshold = 0.0f;
+
     int32_t window_size         = 6;       // W — deferred window length
     bool    enable_mla          = false;   // multi-level acceleration
     bool    debug_trace         = false;   // verbose trace logging
