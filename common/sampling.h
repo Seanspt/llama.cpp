@@ -130,23 +130,47 @@ struct common_params_speculative_fly;
 // Per-step FLy verification statistics.
 // Callers accumulate across steps to get aggregate counts.
 struct common_fly_stats {
+    // ── Acceptance / rejection counts ──
     int n_loose_accept   = 0;  // mismatch accepted via deferred window
-    int n_strict_reject   = 0;  // margin >= threshold
+    int n_strict_reject   = 0;  // margin >= threshold (margin gate) or ΔlogP >= τ
     int n_control_reject  = 0;  // special-token hard block
     int n_window_reject   = 0;  // window contained another mismatch
     int n_boundary_reject = 0;  // not enough lookahead (K > W)
-    int n_total_draft     = 0;  // total draft tokens processed
-    int n_total_match     = 0;  // total exact matches
 
+    // ── Named kill paths (subset of n_strict_reject) ──
+    int n_margin_kill = 0;      // rejected by margin gate (MARGIN-KILL-SHORT)
+    int n_delta_kill  = 0;      // rejected by ΔlogP gate (DLP-KILL-*)
+
+    // ── P1 (analytical pass) ──
+    int n_total_draft = 0;      // total draft positions inspected
+    int n_total_match = 0;      // exact match positions
+    int n_total_miss  = 0;      // mismatch positions (= n_total_draft - n_total_match after final merge)
+
+    // ── ΔlogP distribution (loose accepts only) ──
     // ΔlogP = log P(target_top1) - log P(draft_token)
     // Positive value means the target model preferred its own top-1 over the
     // draft token. Loose-accepted tokens carry non-zero ΔlogP — this is the
     // probability mass "given up" for acceleration.
-    double sum_delta_logp = 0.0;
-    int    n_delta_logp   = 0;
+    double sum_delta_logp  = 0.0;
+    int    n_delta_logp    = 0;
+    float  delta_logp_min  =  INFINITY;
+    float  delta_logp_max  = -INFINITY;
+    int    n_delta_zero    = 0;   // loose accepts where delta_logp == 0 (gate blind spot)
+    int    n_delta_ge_tau  = 0;   // loose accepts where delta_logp >= τ (should be 0)
+
+    // ── Margin distribution (loose accepts only) ──
+    float  margin_min      =  INFINITY;
+    float  margin_max      = -INFINITY;
+    double sum_margin      = 0.0;  // for computing mean
+
+    // ── Helpers ──
 
     float avg_delta_logp() const {
         return n_delta_logp > 0 ? (float)(sum_delta_logp / n_delta_logp) : 0.0f;
+    }
+
+    float avg_margin() const {
+        return n_delta_logp > 0 ? (float)(sum_margin / n_delta_logp) : 0.0f;
     }
 
     void merge(const common_fly_stats & other) {
@@ -155,10 +179,20 @@ struct common_fly_stats {
         n_control_reject  += other.n_control_reject;
         n_window_reject   += other.n_window_reject;
         n_boundary_reject += other.n_boundary_reject;
+        n_margin_kill     += other.n_margin_kill;
+        n_delta_kill      += other.n_delta_kill;
         n_total_draft     += other.n_total_draft;
         n_total_match     += other.n_total_match;
+        n_total_miss      += other.n_total_miss;
         sum_delta_logp    += other.sum_delta_logp;
         n_delta_logp      += other.n_delta_logp;
+        delta_logp_min     = std::min(delta_logp_min, other.delta_logp_min);
+        delta_logp_max     = std::max(delta_logp_max, other.delta_logp_max);
+        n_delta_zero      += other.n_delta_zero;
+        n_delta_ge_tau    += other.n_delta_ge_tau;
+        margin_min         = std::min(margin_min, other.margin_min);
+        margin_max         = std::max(margin_max, other.margin_max);
+        sum_margin        += other.sum_margin;
     }
 
     void reset() {
@@ -167,10 +201,20 @@ struct common_fly_stats {
         n_control_reject  = 0;
         n_window_reject   = 0;
         n_boundary_reject = 0;
+        n_margin_kill     = 0;
+        n_delta_kill      = 0;
         n_total_draft     = 0;
         n_total_match     = 0;
+        n_total_miss      = 0;
         sum_delta_logp    = 0.0;
         n_delta_logp      = 0;
+        delta_logp_min    =  INFINITY;
+        delta_logp_max    = -INFINITY;
+        n_delta_zero      = 0;
+        n_delta_ge_tau    = 0;
+        margin_min        =  INFINITY;
+        margin_max        = -INFINITY;
+        sum_margin        = 0.0;
     }
 };
 

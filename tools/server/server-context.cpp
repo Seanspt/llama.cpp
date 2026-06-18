@@ -204,6 +204,15 @@ struct server_slot {
     int32_t n_draft_verif_steps = 0; // Total draft token verification steps by the target model
     std::vector<int32_t> n_accepted_per_pos; // Accepted tokens per draft position
 
+    // FLy per-generation accumulator
+    common_fly_stats fly_stats;
+
+    // FLy config snapshot (captured at slot init for summary printing)
+    bool  fly_enabled              = false;
+    float fly_delta_logp_threshold = 0.0f;
+    float fly_ambiguity_threshold  = 2.0f;
+    int   fly_window_size          = 6;
+
     void reset() {
         SLT_DBG(*this, "%s", "\n");
 
@@ -231,6 +240,7 @@ struct server_slot {
         n_draft_accepted = 0;
         n_draft_verif_steps = 0;
         n_accepted_per_pos.clear();
+        fly_stats.reset();
 
         task_prev = std::move(task);
         task.reset();
@@ -532,6 +542,51 @@ struct server_slot {
         }
 
         common_speculative_print_stats(spec);
+
+        // FLy per-generation summary (only when FLy was active)
+        if (fly_enabled && fly_stats.n_total_draft > 0) {
+            const auto & fs = fly_stats;
+            const int n_total_pos  = fs.n_total_draft;
+            const int n_total_miss = fs.n_total_miss;
+            const int n_match      = fs.n_total_match;
+
+            // P1 match rate
+            const float match_pct = n_total_pos > 0 ? 100.0f * (float)n_match / (float)n_total_pos : 0.0f;
+
+            // loose accept rate (denominator = total accepted draft tokens)
+            const int   n_acc_total = n_draft_accepted;
+            const float loose_pct   = n_acc_total > 0 ? 100.0f * (float)fs.n_loose_accept / (float)n_acc_total : 0.0f;
+
+            // ΔlogP distribution
+            const float dlp_min      = fs.n_delta_logp > 0 ? fs.delta_logp_min : 0.0f;
+            const float dlp_mean     = fs.avg_delta_logp();
+            const float dlp_max      = fs.n_delta_logp > 0 ? fs.delta_logp_max : 0.0f;
+            const float dlp_zero_pct = fs.n_delta_logp > 0 ? 100.0f * (float)fs.n_delta_zero / (float)fs.n_delta_logp : 0.0f;
+
+            // margin distribution (loose accepts)
+            const float mar_min  = fs.n_delta_logp > 0 ? fs.margin_min : 0.0f;
+            const float mar_mean = fs.avg_margin();
+            const float mar_max  = fs.n_delta_logp > 0 ? fs.margin_max : 0.0f;
+
+            const std::string fl = string_format(
+                "statistics FLy: τ=%.2f, margin_thr=%.2f, W=%d"
+                " | P1: pos=%d match=%d miss=%d match%%=%.1f"
+                " | #loose=%d loose%%=%.1f"
+                " | dlp(min/mean/max)=%.4f/%.4f/%.4f #dlp_zero=%d(%.1f%%) #dlp_ge_τ=%d"
+                " | mar(min/mean/max)=%.2f/%.2f/%.2f"
+                " | #margin_kill=%d #delta_kill=%d",
+                (double)fly_delta_logp_threshold,
+                (double)fly_ambiguity_threshold,
+                fly_window_size,
+                n_total_pos, n_match, n_total_miss, (double)match_pct,
+                fs.n_loose_accept, (double)loose_pct,
+                (double)dlp_min, (double)dlp_mean, (double)dlp_max,
+                fs.n_delta_zero, (double)dlp_zero_pct, fs.n_delta_ge_tau,
+                (double)mar_min, (double)mar_mean, (double)mar_max,
+                fs.n_margin_kill, fs.n_delta_kill);
+
+            SLT_INF(*this, "%s\n", fl.c_str());
+        }
     }
 
     json to_json(bool only_metrics = false) const {
@@ -1179,6 +1234,12 @@ private:
             slot.ctx_dft = ctx_dft.get();
             slot.spec    = spec.get();
             slot.n_ctx   = n_ctx_slot;
+
+            // snapshot FLy config for per-slot summary printing
+            slot.fly_enabled              = params_base.speculative.fly.enabled;
+            slot.fly_delta_logp_threshold = params_base.speculative.fly.delta_logp_threshold;
+            slot.fly_ambiguity_threshold  = params_base.speculative.fly.ambiguity_threshold;
+            slot.fly_window_size          = params_base.speculative.fly.window_size;
 
             slot.mctx                   = mctx;
             slot.prompt.tokens.has_mtmd = mctx != nullptr;
@@ -3505,7 +3566,8 @@ private:
                         const bool stochastic = slot.task && slot.task->params.sampling.temp > 0;
                         accepted = common_sampler_sample_and_accept_n_fly(
                             slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft,
-                            params_base.speculative.fly, /* grammar_first */ false, stochastic);
+                            params_base.speculative.fly, /* grammar_first */ false, stochastic,
+                            &slot.fly_stats);
                     } else {
                         accepted = common_sampler_sample_and_accept_n(
                             slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);

@@ -875,9 +875,13 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         margin[i] = compute_ambiguity_margin(logits, n_vocab);
         match[i]  = (draft[i] == target[i]);
 
-        // Accumulate match count for stats
-        if (match[i]) {
-            if (st) { st->n_total_match++; }
+        // Phase-1 per-position counts (for summary statistics)
+        if (st) {
+            if (match[i]) {
+                st->n_total_match++;
+            } else {
+                st->n_total_miss++;
+            }
         }
 
         // ΔlogP = log P_target(top1) - log P_target(draft_token)
@@ -1002,6 +1006,8 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                 //    draft token would be genuinely lossy; the window that
                 //    would normally catch this is unavailable.
                 bool short_gate_reject = false;
+                bool is_delta_kill  = false;
+                bool is_margin_kill = false;
 
                 // ΔlogP gate
                 if (use_delta_logp_gate && delta_logp[j] >= delta_logp_threshold) {
@@ -1010,6 +1016,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                                 j, (double)delta_logp[j], (double)delta_logp_threshold);
                     }
                     short_gate_reject = true;
+                    is_delta_kill     = true;
                 }
 
                 // Margin safety backstop: always consult margin when we
@@ -1027,10 +1034,15 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                                 (double)margin[j], (double)ambiguity_threshold);
                     }
                     short_gate_reject = true;
+                    is_margin_kill    = true;
                 }
 
                 if (short_gate_reject) {
-                    if (st) { st->n_strict_reject++; }
+                    if (st) {
+                        st->n_strict_reject++;
+                        if (is_delta_kill)  { st->n_delta_kill++; }
+                        if (is_margin_kill) { st->n_margin_kill++; }
+                    }
                     first_reject = j;
                     break;
                 }
@@ -1054,6 +1066,19 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                     st->n_loose_accept++;
                     st->sum_delta_logp += (double)delta_logp[j];
                     st->n_delta_logp++;
+
+                    // Running ΔlogP distribution
+                    const float dlp = delta_logp[j];
+                    if (dlp < st->delta_logp_min) { st->delta_logp_min = dlp; }
+                    if (dlp > st->delta_logp_max) { st->delta_logp_max = dlp; }
+                    if (dlp == 0.0f)              { st->n_delta_zero++; }
+                    if (dlp >= delta_logp_threshold) { st->n_delta_ge_tau++; }
+
+                    // Running margin distribution
+                    const float m = margin[j];
+                    if (m < st->margin_min) { st->margin_min = m; }
+                    if (m > st->margin_max) { st->margin_max = m; }
+                    st->sum_margin += (double)m;
                 }
                 continue;
             }
@@ -1088,7 +1113,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                             tgt_text   ? tgt_text   : "?", target[j],
                             (double)delta_logp[j], (double)delta_logp_threshold);
                 }
-                if (st) { st->n_strict_reject++; }
+                if (st) { st->n_strict_reject++; st->n_delta_kill++; }
                 first_reject = j;
                 break;
             }
@@ -1111,6 +1136,19 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                 st->n_loose_accept++;
                 st->sum_delta_logp += (double)delta_logp[j];
                 st->n_delta_logp++;
+
+                // Running ΔlogP distribution
+                const float dlp = delta_logp[j];
+                if (dlp < st->delta_logp_min) { st->delta_logp_min = dlp; }
+                if (dlp > st->delta_logp_max) { st->delta_logp_max = dlp; }
+                if (dlp == 0.0f)              { st->n_delta_zero++; }
+                if (dlp >= delta_logp_threshold) { st->n_delta_ge_tau++; }
+
+                // Running margin distribution
+                const float m = margin[j];
+                if (m < st->margin_min) { st->margin_min = m; }
+                if (m > st->margin_max) { st->margin_max = m; }
+                st->sum_margin += (double)m;
             }
             continue;
         } else {
