@@ -880,21 +880,24 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
             if (st) { st->n_total_match++; }
         }
 
-        // ΔlogP = log P(target_top1) - log P(draft_token)
-        // In logit space this is simply logit_target - logit_draft because the
-        // softmax normalisation constant Z cancels out.
-        if (!match[i] && st) {
+        // ΔlogP = log P_target(top1) - log P_target(draft_token)
+        // In logit space this is simply logit[target] - logit[draft] because
+        // the softmax normalisation constant Z cancels out.
+        //
+        // NOTE: computed unconditionally on every mismatch — it is a gate
+        // input, not a stats-only quantity. The server path does not pass a
+        // stats pointer, but the ΔlogP gate must still function.
+        if (!match[i]) {
             const float logit_draft  = logits[draft[i]];
             const float logit_target = logits[target[i]];
             if (std::isfinite(logit_draft) && std::isfinite(logit_target)) {
                 delta_logp[i] = logit_target - logit_draft;
             } else if (std::isfinite(logit_target) && !std::isfinite(logit_draft)) {
                 // Draft token has zero / near-zero probability (logit = -inf).
-                // This means the target model strongly disprefers the draft
-                // token. Set delta_logp to INFINITY so the ΔlogP gate can
-                // reject it. Without this, the gate never fires and FLy
-                // degenerates to "accept everything" in MTP scenarios where
-                // per-token logits are sparse (e.g. only top-k are finite).
+                // The target model strongly disprefers it → set to INFINITY
+                // so the ΔlogP gate will reject. Without this, the gate never
+                // fires and FLy degenerates to "accept everything" in MTP
+                // scenarios where per-token logits are sparse (only top-k finite).
                 delta_logp[i] = INFINITY;
             }
         }
