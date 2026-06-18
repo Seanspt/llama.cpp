@@ -968,7 +968,11 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         }
 
         if (gate_reject) {
-            if (st) { st->n_strict_reject++; }
+            if (st) {
+                st->n_strict_reject++;
+                if (use_delta_logp_gate) { st->n_delta_kill++;  }
+                else                     { st->n_margin_kill++; }
+            }
             first_reject = j;
             break;
         }
@@ -1156,6 +1160,18 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
             if (st) { st->n_window_reject++; }
             first_reject = j;
             break;
+        }
+    }
+
+    // Mismatches at positions j > first_reject were never evaluated by
+    // Phase 2 (the loop broke at first_reject). Count them as "pending"
+    // so that the accounting balances:
+    //   n_total_miss = loose + strict + control + window + boundary + pending
+    if (st) {
+        for (int j = first_reject; j < K; j++) {
+            if (!match[j]) {
+                st->n_pending++;
+            }
         }
     }
 

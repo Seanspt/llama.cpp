@@ -139,8 +139,14 @@ struct common_fly_stats {
     int n_boundary_reject = 0;  // not enough lookahead (K > W)
 
     // ── Named kill paths (subset of n_strict_reject) ──
-    int n_margin_kill = 0;      // rejected by margin gate (MARGIN-KILL-SHORT)
-    int n_delta_kill  = 0;      // rejected by ΔlogP gate (DLP-KILL-*)
+    int n_margin_kill = 0;      // rejected by margin gate (MARGIN-KILL-SHORT or main margin gate)
+    int n_delta_kill  = 0;      // rejected by ΔlogP gate (DLP-KILL-* or main ΔlogP gate)
+
+    // ── Pending (never evaluated in Phase 2) ──
+    // Mismatches at positions j > first_reject — the Phase 2 loop breaks at
+    // first_reject, so these positions are never counted in any accept/reject
+    // counter. They represent "opportunity cost" of the early break.
+    int n_pending = 0;
 
     // ── P1 (analytical pass) ──
     int n_total_draft = 0;      // total draft positions inspected
@@ -182,6 +188,7 @@ struct common_fly_stats {
         n_boundary_reject += other.n_boundary_reject;
         n_margin_kill     += other.n_margin_kill;
         n_delta_kill      += other.n_delta_kill;
+        n_pending         += other.n_pending;
         n_total_draft     += other.n_total_draft;
         n_total_match     += other.n_total_match;
         n_total_miss      += other.n_total_miss;
@@ -204,6 +211,7 @@ struct common_fly_stats {
         n_boundary_reject = 0;
         n_margin_kill     = 0;
         n_delta_kill      = 0;
+        n_pending         = 0;
         n_total_draft     = 0;
         n_total_match     = 0;
         n_total_miss      = 0;

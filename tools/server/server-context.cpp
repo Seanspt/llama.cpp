@@ -568,10 +568,16 @@ struct server_slot {
             const float mar_mean = fs.avg_margin();
             const float mar_max  = fs.n_delta_logp > 0 ? fs.margin_max : 0.0f;
 
+            // Balance check: all MISS must be accounted for
+            const int miss_sum = fs.n_loose_accept + fs.n_strict_reject
+                               + fs.n_control_reject + fs.n_window_reject
+                               + fs.n_boundary_reject + fs.n_pending;
+            const bool balanced = (miss_sum == n_total_miss);
+
             const std::string fl = string_format(
                 "statistics FLy: τ=%.2f, margin_thr=%.2f, W=%d"
                 " | P1: pos=%d match=%d miss=%d match%%=%.1f"
-                " | #loose=%d loose%%=%.1f"
+                " | #loose=%d loose%%=%.1f #strict=%d #ctrl=%d #win=%d #bnd=%d #pend=%d %s"
                 " | dlp(min/mean/max)=%.4f/%.4f/%.4f #dlp_zero=%d(%.1f%%) #dlp_ge_τ=%d"
                 " | mar(min/mean/max)=%.2f/%.2f/%.2f"
                 " | #margin_kill=%d #delta_kill=%d",
@@ -580,6 +586,10 @@ struct server_slot {
                 fly_window_size,
                 n_total_pos, n_match, n_total_miss, (double)match_pct,
                 fs.n_loose_accept, (double)loose_pct,
+                fs.n_strict_reject, fs.n_control_reject,
+                fs.n_window_reject, fs.n_boundary_reject,
+                fs.n_pending,
+                balanced ? "" : string_format("MISMATCH(sum=%d)", miss_sum).c_str(),
                 (double)dlp_min, (double)dlp_mean, (double)dlp_max,
                 fs.n_delta_zero, (double)dlp_zero_pct, fs.n_delta_ge_tau,
                 (double)mar_min, (double)mar_mean, (double)mar_max,
