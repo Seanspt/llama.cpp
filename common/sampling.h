@@ -4,6 +4,7 @@
 
 #include "common.h"
 
+#include <cmath>
 #include <string>
 #include <vector>
 
