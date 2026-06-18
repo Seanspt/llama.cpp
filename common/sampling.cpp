@@ -789,8 +789,15 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     }
 
     if (params.debug_trace) {
-        LOG_INF("FLy ENTER: K=%d, stochastic=%d, thr=%.2f, W=%d\n",
-                K, (int) stochastic, (double) params.ambiguity_threshold, params.window_size);
+        const bool  dlp_active = (params.delta_logp_threshold > 0.0f);
+        if (dlp_active) {
+            LOG_INF("FLy ENTER: K=%d, stochastic=%d, ΔlogP gate τ=%.4f, margin safety thr=%.2f, W=%d\n",
+                    K, (int) stochastic, (double) params.delta_logp_threshold,
+                    (double) params.ambiguity_threshold, params.window_size);
+        } else {
+            LOG_INF("FLy ENTER: K=%d, stochastic=%d, margin gate thr=%.2f, W=%d\n",
+                    K, (int) stochastic, (double) params.ambiguity_threshold, params.window_size);
+        }
     }
 
     if (K == 0) {
@@ -881,6 +888,14 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
             const float logit_target = logits[target[i]];
             if (std::isfinite(logit_draft) && std::isfinite(logit_target)) {
                 delta_logp[i] = logit_target - logit_draft;
+            } else if (std::isfinite(logit_target) && !std::isfinite(logit_draft)) {
+                // Draft token has zero / near-zero probability (logit = -inf).
+                // This means the target model strongly disprefers the draft
+                // token. Set delta_logp to INFINITY so the ΔlogP gate can
+                // reject it. Without this, the gate never fires and FLy
+                // degenerates to "accept everything" in MTP scenarios where
+                // per-token logits are sparse (e.g. only top-k are finite).
+                delta_logp[i] = INFINITY;
             }
         }
 
@@ -967,7 +982,56 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
             // genuinely cannot be verified → conservative reject.
             if (K <= window_W) {
                 // Draft is too short for a meaningful lookahead window.
-                // Accept this ambiguous mismatch.
+                //
+                // Without lookahead tokens to verify semantic consistency,
+                // we fall back to a dual-gate safety check: the mismatch
+                // must pass BOTH the primary gate (ΔlogP or margin) AND the
+                // margin safety backstop. This prevents FLy from degenerating
+                // into "accept everything" when K is small (e.g. MTP with
+                // K=4, W=6) — a scenario where the deferred window is
+                // structurally unavailable.
+                //
+                // ── Dual gate for short drafts ──
+                // 1. Primary gate (ΔlogP or margin, same as main gate above).
+                // 2. Margin safety backstop (always active in short-draft
+                //    mode, even when ΔlogP gate is enabled). A highly-peaked
+                //    target distribution with a mismatch means accepting the
+                //    draft token would be genuinely lossy; the window that
+                //    would normally catch this is unavailable.
+                bool short_gate_reject = false;
+
+                // ΔlogP gate
+                if (use_delta_logp_gate && delta_logp[j] >= delta_logp_threshold) {
+                    if (params.debug_trace) {
+                        LOG_INF("FLy DLP-KILL-SHORT: pos=%d delta_logp=%.4f >= τ=%.2f, rejecting despite short draft\n",
+                                j, (double)delta_logp[j], (double)delta_logp_threshold);
+                    }
+                    short_gate_reject = true;
+                }
+
+                // Margin safety backstop: always consult margin when we
+                // can't look ahead. A sharply-peaked target distribution
+                // (high margin) together with a mismatch means the target
+                // model is confident about a different token.
+                if (!short_gate_reject && margin[j] >= ambiguity_threshold) {
+                    if (params.debug_trace) {
+                        const char * draft_text = llama_vocab_get_text(vocab, draft[j]);
+                        const char * tgt_text   = llama_vocab_get_text(vocab, target[j]);
+                        LOG_INF("FLy MARGIN-KILL-SHORT: pos=%d draft=\"%s\"(%d) target=\"%s\"(%d) margin=%.2f >= thr=%.2f, rejecting short draft mismatch\n",
+                                j,
+                                draft_text ? draft_text : "?", draft[j],
+                                tgt_text   ? tgt_text   : "?", target[j],
+                                (double)margin[j], (double)ambiguity_threshold);
+                    }
+                    short_gate_reject = true;
+                }
+
+                if (short_gate_reject) {
+                    if (st) { st->n_strict_reject++; }
+                    first_reject = j;
+                    break;
+                }
+
                 if (params.debug_trace) {
                     const char * draft_text = llama_vocab_get_text(vocab, draft[j]);
                     const char * tgt_text   = llama_vocab_get_text(vocab, target[j]);
@@ -981,16 +1045,6 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                             draft_text ? draft_text : "?", draft[j],
                             tgt_text   ? tgt_text   : "?", target[j],
                             (double)delta_logp[j], (double)margin[j]);
-                }
-                // ΔlogP gate: even short-draft accepts must respect τ
-                if (use_delta_logp_gate && delta_logp[j] >= delta_logp_threshold) {
-                    if (params.debug_trace) {
-                        LOG_INF("FLy DLP-KILL-SHORT: pos=%d delta_logp=%.4f >= τ=%.2f, rejecting despite short draft\n",
-                                j, (double)delta_logp[j], (double)delta_logp_threshold);
-                    }
-                    if (st) { st->n_strict_reject++; }
-                    first_reject = j;
-                    break;
                 }
 
                 if (st) {
