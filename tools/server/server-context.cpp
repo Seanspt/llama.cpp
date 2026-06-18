@@ -574,12 +574,19 @@ struct server_slot {
                                + fs.n_boundary_reject + fs.n_pending;
             const bool balanced = (miss_sum == n_total_miss);
 
+            // delta_kill ΔlogP distribution
+            const float dkdlp_min  = fs.n_dk_delta_logp > 0 ? fs.dk_delta_logp_min       : 0.0f;
+            const float dkdlp_mean = fs.avg_dk_delta_logp();
+            const float dkdlp_max  = fs.n_dk_delta_logp > 0 ? fs.dk_delta_logp_max       : 0.0f;
+            const float dkdlp_zero_pct = fs.n_dk_delta_logp > 0 ? 100.0f * (float)fs.n_dk_delta_zero / (float)fs.n_dk_delta_logp : 0.0f;
+
             const std::string fl = string_format(
                 "statistics FLy: τ=%.2f, margin_thr=%.2f, W=%d"
                 " | P1: pos=%d match=%d miss=%d match%%=%.1f"
                 " | #loose=%d loose%%=%.1f #strict=%d #ctrl=%d #win=%d #bnd=%d #pend=%d %s"
-                " | dlp(min/mean/max)=%.4f/%.4f/%.4f #dlp_zero=%d(%.1f%%) #dlp_ge_τ=%d"
-                " | mar(min/mean/max)=%.2f/%.2f/%.2f"
+                " | dlp_loose(min/mean/max)=%.4f/%.4f/%.4f #dlp_zero=%d(%.1f%%) #dlp_ge_τ=%d"
+                " | dlp_kill(min/mean/max)=%.4f/%.4f/%.4f #dk_zero=%d(%.1f%%)"
+                " | mar_loose(min/mean/max)=%.2f/%.2f/%.2f"
                 " | #margin_kill=%d #delta_kill=%d",
                 (double)fly_delta_logp_threshold,
                 (double)fly_ambiguity_threshold,
@@ -592,6 +599,8 @@ struct server_slot {
                 balanced ? "" : string_format("MISMATCH(sum=%d)", miss_sum).c_str(),
                 (double)dlp_min, (double)dlp_mean, (double)dlp_max,
                 fs.n_delta_zero, (double)dlp_zero_pct, fs.n_delta_ge_tau,
+                (double)dkdlp_min, (double)dkdlp_mean, (double)dkdlp_max,
+                fs.n_dk_delta_zero, (double)dkdlp_zero_pct,
                 (double)mar_min, (double)mar_mean, (double)mar_max,
                 fs.n_margin_kill, fs.n_delta_kill);
 

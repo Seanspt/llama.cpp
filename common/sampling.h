@@ -142,6 +142,19 @@ struct common_fly_stats {
     int n_margin_kill = 0;      // rejected by margin gate (MARGIN-KILL-SHORT or main margin gate)
     int n_delta_kill  = 0;      // rejected by ΔlogP gate (DLP-KILL-* or main ΔlogP gate)
 
+    // ── ΔlogP distribution (delta_kill rejects only) ──
+    // Mirrors the loose-accept ΔlogP tracking but for rejects:
+    // these are the values that triggered the gate.
+    double sum_dk_delta_logp = 0.0;
+    int    n_dk_delta_logp   = 0;
+    float  dk_delta_logp_min =  INFINITY;
+    float  dk_delta_logp_max = -INFINITY;
+    int    n_dk_delta_zero   = 0;  // delta_kill where dlp == 0 (shouldn't happen if gate works)
+
+    float avg_dk_delta_logp() const {
+        return n_dk_delta_logp > 0 ? (float)(sum_dk_delta_logp / n_dk_delta_logp) : 0.0f;
+    }
+
     // ── Pending (never evaluated in Phase 2) ──
     // Mismatches at positions j > first_reject — the Phase 2 loop breaks at
     // first_reject, so these positions are never counted in any accept/reject
@@ -188,6 +201,11 @@ struct common_fly_stats {
         n_boundary_reject += other.n_boundary_reject;
         n_margin_kill     += other.n_margin_kill;
         n_delta_kill      += other.n_delta_kill;
+        sum_dk_delta_logp += other.sum_dk_delta_logp;
+        n_dk_delta_logp   += other.n_dk_delta_logp;
+        dk_delta_logp_min  = std::min(dk_delta_logp_min, other.dk_delta_logp_min);
+        dk_delta_logp_max  = std::max(dk_delta_logp_max, other.dk_delta_logp_max);
+        n_dk_delta_zero   += other.n_dk_delta_zero;
         n_pending         += other.n_pending;
         n_total_draft     += other.n_total_draft;
         n_total_match     += other.n_total_match;
@@ -211,6 +229,11 @@ struct common_fly_stats {
         n_boundary_reject = 0;
         n_margin_kill     = 0;
         n_delta_kill      = 0;
+        sum_dk_delta_logp = 0.0;
+        n_dk_delta_logp   = 0;
+        dk_delta_logp_min =  INFINITY;
+        dk_delta_logp_max = -INFINITY;
+        n_dk_delta_zero   = 0;
         n_pending         = 0;
         n_total_draft     = 0;
         n_total_match     = 0;

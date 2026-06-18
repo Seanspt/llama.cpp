@@ -970,8 +970,21 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
         if (gate_reject) {
             if (st) {
                 st->n_strict_reject++;
-                if (use_delta_logp_gate) { st->n_delta_kill++;  }
-                else                     { st->n_margin_kill++; }
+                if (use_delta_logp_gate) {
+                    st->n_delta_kill++;
+                    const float dlp = delta_logp[j];
+                    st->sum_dk_delta_logp += (double)dlp;
+                    st->n_dk_delta_logp++;
+                    if (dlp < st->dk_delta_logp_min) { st->dk_delta_logp_min = dlp; }
+                    if (dlp > st->dk_delta_logp_max) { st->dk_delta_logp_max = dlp; }
+                    if (dlp == 0.0f)                 { st->n_dk_delta_zero++; }
+                    if (params.debug_trace) {
+                        LOG_INF("FLy DELTA-KILL pos %d: delta_logp=%.4f >= τ=%.2f\n",
+                                j, (double)dlp, (double)delta_logp_threshold);
+                    }
+                } else {
+                    st->n_margin_kill++;
+                }
             }
             first_reject = j;
             break;
@@ -1021,6 +1034,14 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                     }
                     short_gate_reject = true;
                     is_delta_kill     = true;
+                    if (st) {
+                        const float dlp = delta_logp[j];
+                        st->sum_dk_delta_logp += (double)dlp;
+                        st->n_dk_delta_logp++;
+                        if (dlp < st->dk_delta_logp_min) { st->dk_delta_logp_min = dlp; }
+                        if (dlp > st->dk_delta_logp_max) { st->dk_delta_logp_max = dlp; }
+                        if (dlp == 0.0f)                 { st->n_dk_delta_zero++; }
+                    }
                 }
 
                 // Margin safety backstop: always consult margin when we
@@ -1117,7 +1138,15 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
                             tgt_text   ? tgt_text   : "?", target[j],
                             (double)delta_logp[j], (double)delta_logp_threshold);
                 }
-                if (st) { st->n_strict_reject++; st->n_delta_kill++; }
+                if (st) {
+                    st->n_strict_reject++; st->n_delta_kill++;
+                    const float dlp = delta_logp[j];
+                    st->sum_dk_delta_logp += (double)dlp;
+                    st->n_dk_delta_logp++;
+                    if (dlp < st->dk_delta_logp_min) { st->dk_delta_logp_min = dlp; }
+                    if (dlp > st->dk_delta_logp_max) { st->dk_delta_logp_max = dlp; }
+                    if (dlp == 0.0f)                 { st->n_dk_delta_zero++; }
+                }
                 first_reject = j;
                 break;
             }
@@ -1168,7 +1197,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_fly(
     // so that the accounting balances:
     //   n_total_miss = loose + strict + control + window + boundary + pending
     if (st) {
-        for (int j = first_reject; j < K; j++) {
+        for (int j = first_reject + 1; j < K; j++) {
             if (!match[j]) {
                 st->n_pending++;
             }
